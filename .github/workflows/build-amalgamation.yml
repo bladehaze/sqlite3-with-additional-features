@@ -67,19 +67,22 @@ jobs:
             exit 1
           }
           
-          # Verify sqlite3.c was generated
-          if [ ! -f sqlite3.c ]; then
-            echo "Error: sqlite3.c was not generated"
+          # Build shell.c
+          make shell.c || {
+            echo "Error: make shell.c failed"
             exit 1
-          fi
+          }
           
-          # Verify sqlite3.h was generated
-          if [ ! -f sqlite3.h ]; then
-            echo "Error: sqlite3.h was not generated"
-            exit 1
-          fi
+          # Verify all files were generated
+          for file in sqlite3.c sqlite3.h sqlite3ext.h shell.c; do
+            if [ ! -f "$file" ]; then
+              echo "Error: $file was not generated"
+              exit 1
+            fi
+          done
           
-          echo "✓ sqlite3.c and sqlite3.h generated successfully"
+          echo "✓ All files generated successfully:"
+          ls -lh sqlite3.c sqlite3.h sqlite3ext.h shell.c
 
       - name: Verify amalgamation
         run: |
@@ -113,7 +116,19 @@ jobs:
           path: |
             sqlite3.c
             sqlite3.h
+            sqlite3ext.h
+            shell.c
           retention-days: 90
+
+      - name: Get version info
+        id: version
+        run: |
+          VERSION=$(cat VERSION 2>/dev/null || echo "unknown")
+          COMMIT_SHORT=$(git rev-parse --short HEAD)
+          TAG_NAME="v${VERSION}-exclude-${COMMIT_SHORT}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "commit=$COMMIT_SHORT" >> $GITHUB_OUTPUT
 
       - name: Commit amalgamation (on main only)
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
@@ -121,11 +136,59 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           
-          if [ -n "$(git status --porcelain sqlite3.c sqlite3.h 2>/dev/null)" ]; then
-            git add sqlite3.c sqlite3.h
+          if [ -n "$(git status --porcelain sqlite3.c sqlite3.h sqlite3ext.h shell.c 2>/dev/null)" ]; then
+            git add sqlite3.c sqlite3.h sqlite3ext.h shell.c
             git commit -m "Regenerate amalgamation with EXCLUDE feature [skip ci]" || echo "No changes or already committed"
             git push origin HEAD || echo "Push skipped"
           fi
+
+      - name: Create GitHub Release (on main branch)
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "SQLite ${{ steps.version.outputs.version }} with EXCLUDE feature"
+          body: |
+            SQLite with EXCLUDE feature support
+            
+            **Version:** ${{ steps.version.outputs.version }}
+            **Commit:** ${{ steps.version.outputs.commit }}
+            
+            This release includes the `SELECT * EXCLUDE(column_list)` syntax.
+            
+            ## Files Included
+            - `sqlite3.c` - SQLite amalgamation source
+            - `sqlite3.h` - SQLite header file
+            - `sqlite3ext.h` - SQLite extension header
+            - `shell.c` - SQLite shell source
+            
+            ## Usage
+            ```sql
+            SELECT * EXCLUDE(email) FROM employees;
+            SELECT * EXCLUDE(email, salary) FROM employees;
+            SELECT employees.* EXCLUDE(email) FROM employees;
+            ```
+            
+            ## Download URLs
+            You can download these files directly from:
+            - Raw file URLs (replace `${{ steps.version.outputs.tag }}` with the actual tag):
+              - `https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/sqlite3.c`
+              - `https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/sqlite3.h`
+              - `https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/sqlite3ext.h`
+              - `https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/shell.c`
+            
+            ## Changes
+            - Added EXCLUDE keyword support
+            - Modified parser to handle EXCLUDE clause
+            - Updated column expansion logic
+          files: |
+            sqlite3.c
+            sqlite3.h
+            sqlite3ext.h
+            shell.c
+          draft: false
+          prerelease: false
+          generate_release_notes: false
 
       - name: Create GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
@@ -134,6 +197,8 @@ jobs:
           files: |
             sqlite3.c
             sqlite3.h
+            sqlite3ext.h
+            shell.c
           body: |
             SQLite with EXCLUDE feature support
             
