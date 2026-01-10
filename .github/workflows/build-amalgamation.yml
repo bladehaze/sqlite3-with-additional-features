@@ -53,6 +53,11 @@ jobs:
           gcc -o lemon tool/lemon.c
           chmod +x lemon
 
+      - name: Build mksourceid tool
+        run: |
+          gcc -o mksourceid tool/mksourceid.c
+          chmod +x mksourceid
+
       - name: Generate parse.c and parse.h
         run: |
           cp src/parse.y .
@@ -86,9 +91,60 @@ jobs:
       - name: Generate sqlite3.h
         run: |
           if [ -f tool/mksqlite3h.tcl ]; then
-            tclsh tool/mksqlite3h.tcl . -o sqlite3.h
+            # mksqlite3h.tcl needs mksourceid and a manifest file
+            # Create a minimal manifest if it doesn't exist (for Git repos)
+            if [ ! -f manifest ]; then
+              echo "Creating minimal manifest file for Git repository..."
+              # Get version from VERSION file if it exists
+              if [ -f VERSION ]; then
+                VERSION=$(cat VERSION)
+              else
+                VERSION="3.x.x"
+              fi
+              # Create a minimal manifest that mksourceid can process
+              echo "D $(date -u +'%Y-%m-%d %H:%M:%S UTC')" > manifest
+              echo "# SQLite version $VERSION" >> manifest
+              echo "# Git repository - manifest generated for build" >> manifest
+            fi
+            
+            # Try to generate sqlite3.h using mksqlite3h.tcl
+            if tclsh tool/mksqlite3h.tcl . -o sqlite3.h 2>&1; then
+              echo "✓ sqlite3.h generated successfully"
+            else
+              echo "Warning: mksqlite3h.tcl failed, using fallback method"
+              # Fallback: use sqlite.h.in directly
+              if [ -f src/sqlite.h.in ]; then
+                cp src/sqlite.h.in sqlite3.h
+                # Get version
+                if [ -f VERSION ]; then
+                  VERSION=$(cat VERSION)
+                  VERSION_NUM=$(echo $VERSION | awk -F. '{printf "%d%03d%03d", $1, $2, $3}')
+                else
+                  VERSION="3.x.x"
+                  VERSION_NUM="3000000"
+                fi
+                # Replace placeholders
+                sed -i "s/--VERS--/$VERSION/g" sqlite3.h
+                sed -i "s/--VERSION-NUMBER--/$VERSION_NUM/g" sqlite3.h
+                sed -i "s/--SOURCE-ID--/Git $(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')/g" sqlite3.h
+              else
+                echo "Error: Cannot generate sqlite3.h"
+                exit 1
+              fi
+            fi
           elif [ -f src/sqlite.h.in ]; then
             cp src/sqlite.h.in sqlite3.h
+            # Replace version placeholders
+            if [ -f VERSION ]; then
+              VERSION=$(cat VERSION)
+              VERSION_NUM=$(echo $VERSION | awk -F. '{printf "%d%03d%03d", $1, $2, $3}')
+              sed -i "s/--VERS--/$VERSION/g" sqlite3.h
+              sed -i "s/--VERSION-NUMBER--/$VERSION_NUM/g" sqlite3.h
+            fi
+            sed -i "s/--SOURCE-ID--/Git $(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')/g" sqlite3.h
+          else
+            echo "Error: Cannot find tool to generate sqlite3.h"
+            exit 1
           fi
           # Copy to tsrc/ for mksqlite3c.tcl (it reads version from tsrc/sqlite3.h)
           cp sqlite3.h tsrc/sqlite3.h
