@@ -17,31 +17,60 @@
 # After the "tsrc" directory has been created and populated, run
 # this script:
 #
-#      tclsh mksqlite3c.tcl --srcdir $SRC
+#      tclsh mksqlite3c.tcl [flags] [extra source files]
 #
 # The amalgamated SQLite code will be written into sqlite3.c
 #
+
+set help {Usage: tclsh mksqlite3c.tcl <options>
+ where <options> is zero or more of the following with these effects:
+   --nostatic     => Do not generate with compile-time modifiable linkage.
+   --linemacros=?  => Emit #line directives into output or not. (? = 1 or 0)
+   --useapicall   => Prepend functions with SQLITE_APICALL or SQLITE_CDECL.
+   --srcdir $SRC  => Specify the directory containing constituent sources.
+   --help         => See this.
+ The value setting options default to --linemacros=1 and '--srcdir tsrc' .
+}
 
 # Begin by reading the "sqlite3.h" header file.  Extract the version number
 # from in this file.  The version number is needed to generate the header
 # comment of the amalgamation.
 #
+
 set addstatic 1
 set linemacros 0
 set useapicall 0
+set enable_recover 0
+set srcdir tsrc
+set extrasrc [list]
+
 for {set i 0} {$i<[llength $argv]} {incr i} {
   set x [lindex $argv $i]
-  if {[regexp {^-+nostatic$} $x]} {
+  if {[regexp {^-?-enable-recover$} $x]} {
+    set enable_recover 1
+  } elseif {[regexp {^-?-nostatic$} $x]} {
     set addstatic 0
-  } elseif {[regexp {^-+linemacros} $x]} {
-    set linemacros 1
-  } elseif {[regexp {^-+useapicall} $x]} {
+  } elseif {[regexp {^-?-linemacros(?:=([01]))?$} $x ma ulm]} {
+    if {$ulm == ""} {set ulm 1}
+    set linemacros $ulm
+  } elseif {[regexp {^-?-useapicall$} $x]} {
     set useapicall 1
-  } else {
+  } elseif {[regexp {^-?-srcdir$} $x]} {
+    incr i
+    if {$i==[llength $argv]} {
+      error "No argument following $x"
+    }
+    set srcdir [lindex $argv $i]
+  } elseif {[regexp {^-?-((help)|\?)$} $x]} {
+    puts $help
+    exit 0
+  } elseif {[regexp {^-?-} $x]} {
     error "unknown command-line option: $x"
+  } else {
+    lappend extrasrc $x
   }
 }
-set in [open tsrc/sqlite3.h]
+set in [open $srcdir/sqlite3.h rb]
 set cnt 0
 set VERSION ?????
 while {![eof $in]} {
@@ -55,9 +84,11 @@ close $in
 # Open the output file and write a header comment at the beginning
 # of the file.
 #
-set out [open sqlite3.c w]
+set fname sqlite3.c
+if {$enable_recover} { set fname sqlite3r.c }
+set out [open $fname wb]
 # Force the output to use unix line endings, even on Windows.
-fconfigure $out -translation lf
+fconfigure $out -translation binary
 set today [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S UTC" -gmt 1]
 puts $out [subst \
 {/******************************************************************************
@@ -78,7 +109,36 @@ puts $out [subst \
 ** if you want a wrapper to interface SQLite with your choice of programming
 ** language. The code for the "sqlite3" command-line shell is also in a
 ** separate file. This file contains only code for the core SQLite library.
-*/
+**}]
+set srcroot [file dirname [file dirname [info script]]]
+if {$tcl_platform(platform) eq "windows"} {
+  set vsrcprog src-verify.exe
+} else {
+  set vsrcprog ./src-verify
+}
+if {[file executable $vsrcprog] && [file readable $srcroot/manifest]} {
+  set tmpfile tmp-[clock millisec]-[expr {int(rand()*100000000000)}].txt
+  exec $vsrcprog -x $srcroot > $tmpfile
+  set fd [open $tmpfile rb]
+  set res [string trim [split [read $fd] \n]]
+  close $fd
+  file delete -force $tmpfile
+  puts $out "** The content in this amalgamation comes from Fossil check-in"
+  puts -nonewline $out "** [string range [lindex $res 0] 0 35]"
+  if {[llength $res]==1} {
+    puts $out "."
+  } else {
+    puts $out " with changes in files:\n**"
+    foreach f [lrange $res 1 end] {
+       puts $out "**    [string trim $f]"
+    }
+  }
+} else {
+  puts $out "** The origin of the sources used to build this amalgamation"
+  puts $out "** is unknown."
+}
+puts $out [subst {*/
+#ifndef SQLITE_AMALGAMATION
 #define SQLITE_CORE 1
 #define SQLITE_AMALGAMATION 1}]
 if {$addstatic} {
@@ -87,6 +147,18 @@ if {$addstatic} {
 # define SQLITE_PRIVATE static
 #endif}
 }
+
+# Examine the parse.c file.  If it contains lines of the form:
+#
+#    "#ifndef SQLITE_ENABLE_UPDATE_LIMIT
+# 
+# then set the SQLITE_UDL_CAPABLE_PARSER flag in the amalgamation.
+#
+set in [open $srcdir/parse.c rb]
+if {[regexp {ifndef SQLITE_ENABLE_UPDATE_DELETE_LIMIT} [read $in]]} {
+  puts $out "#define SQLITE_UDL_CAPABLE_PARSER 1"
+}
+close $in
 
 # These are the header files used by SQLite.  The first time any of these
 # files are seen in a #include statement in the C code, include the complete
@@ -127,10 +199,12 @@ foreach hdr {
    vxworks.h
    wal.h
    whereInt.h
+   sqlite3recover.h
 } {
   set available_hdr($hdr) 1
 }
 set available_hdr(sqliteInt.h) 0
+set available_hdr(os_common.h) 0
 set available_hdr(sqlite3session.h) 0
 
 # These headers should be copied into the amalgamation without modifying any
@@ -170,12 +244,12 @@ proc section_comment {text} {
 #
 proc copy_file {filename} {
   global seen_hdr available_hdr varonly_hdr cdecllist out
-  global addstatic linemacros useapicall
+  global addstatic linemacros useapicall srcdir
   set ln 0
   set tail [file tail $filename]
   section_comment "Begin file $tail"
   if {$linemacros} {puts $out "#line 1 \"$filename\""}
-  set in [open $filename r]
+  set in [open $filename rb]
   set varpattern {^[a-zA-Z][a-zA-Z_0-9 *]+(sqlite3[_a-zA-Z0-9]+)(\[|;| =)}
   set declpattern {([a-zA-Z][a-zA-Z_0-9 ]+ \**)(sqlite3[_a-zA-Z0-9]+)(\(.*)}
   if {[file extension $filename]==".h"} {
@@ -183,16 +257,14 @@ proc copy_file {filename} {
   }
   set declpattern ^$declpattern\$
   while {![eof $in]} {
-    set line [gets $in]
+    set line [string trimright [gets $in]]
     incr ln
     if {[regexp {^\s*#\s*include\s+["<]([^">]+)[">]} $line all hdr]} {
       if {[info exists available_hdr($hdr)]} {
         if {$available_hdr($hdr)} {
-          if {$hdr!="os_common.h" && $hdr!="hwtime.h"} {
-            set available_hdr($hdr) 0
-          }
+          set available_hdr($hdr) 0
           section_comment "Include $hdr in the middle of $tail"
-          copy_file tsrc/$hdr
+          copy_file $srcdir/$hdr
           section_comment "Continuing where we left off in $tail"
           if {$linemacros} {puts $out "#line [expr {$ln+1}] \"$filename\""}
         } else {
@@ -243,7 +315,7 @@ proc copy_file {filename} {
             }
           }
           append line $funcname $rest
-          if {$funcname=="sqlite3_sourceid" && !$linemacros} {
+          if {$funcname=="sqlite3_sourceid"} {
             # The sqlite3_sourceid() routine is synthesized at the end of
             # the amalgamation
             puts $out "/* $line */"
@@ -257,7 +329,8 @@ proc copy_file {filename} {
           # Add the SQLITE_PRIVATE before variable declarations or
           # definitions for internal use
           regsub {^SQLITE_API } $line {} line
-          if {![regexp {^sqlite3_} $varname]} {
+          if {![regexp {^sqlite3_} $varname]
+              && ![regexp {^sqlite3Show[A-Z]} $varname]} {
             regsub {^extern } $line {} line
             puts $out "SQLITE_PRIVATE $line"
           } else {
@@ -285,14 +358,30 @@ proc copy_file {filename} {
   section_comment "End of $tail"
 }
 
+# Read the source file named $filename and write it into the
+# sqlite3.c output file. The only transformation is the trimming
+# of EOL whitespace.
+#
+proc copy_file_verbatim {filename} {
+  global out
+  set in [open $filename rb]
+  set tail [file tail $filename]
+  section_comment "Begin EXTRA_SRC file $tail"
+  while {![eof $in]} {
+    set line [string trimright [gets $in]]
+    puts $out $line
+  }
+  section_comment "End of EXTRA_SRC $tail"
+}
 
 # Process the source files.  Process files containing commonly
 # used subroutines first in order to help the compiler find
 # inlining opportunities.
 #
-foreach file {
-   ctime.c
+set flist {
    sqliteInt.h
+   os_common.h
+   ctime.c
 
    global.c
    status.c
@@ -319,6 +408,7 @@ foreach file {
    hash.c
    opcodes.c
 
+   os_kv.c
    os_unix.c
    os_win.c
    memdb.c
@@ -341,6 +431,7 @@ foreach file {
    vdbe.c
    vdbeblob.c
    vdbesort.c
+   vdbevtab.c
    memjournal.c
 
    walker.c
@@ -393,48 +484,34 @@ foreach file {
    fts3_unicode.c
    fts3_unicode2.c
 
-   json1.c
+   json.c
    rtree.c
    icu.c
    fts3_icu.c
    sqlite3rbu.c
    dbstat.c
    dbpage.c
+   carray.c
    sqlite3session.c
    fts5.c
    stmt.c
-} {
-  copy_file tsrc/$file
+}
+if {$enable_recover} {
+  lappend flist sqlite3recover.c dbdata.c
+}
+foreach file $flist {
+  copy_file $srcdir/$file
+}
+foreach file $extrasrc {
+  copy_file_verbatim $file
 }
 
-# Synthesize an alternative sqlite3_sourceid() implementation that
-# that tries to detects changes in the amalgamation source text
-# and modify returns a modified source-id if changes are detected.
-#
-# The only detection mechanism we have is the __LINE__ macro.  So only
-# edits that changes the number of lines of source code are detected.
-#
-if {!$linemacros} {
-  flush $out
-  set in2 [open sqlite3.c]
-  set cnt 0
-  set oldsrcid {}
-  while {![eof $in2]} {
-    incr cnt
-    gets $in2 line
-    if {[regexp {^#define SQLITE_SOURCE_ID } $line]} {set oldsrcid $line}
-  }
-  close $in2
-  regsub {[0-9a-flt]{4}"} $oldsrcid {alt2"} oldsrcid
-  puts $out \
-"#if __LINE__!=[expr {$cnt+0}]
-#undef SQLITE_SOURCE_ID
-$oldsrcid
-#endif
-/* Return the source-id for this library */
-SQLITE_API const char *sqlite3_sourceid(void){ return SQLITE_SOURCE_ID; }"
-}
 puts $out \
-"/************************** End of sqlite3.c ******************************/"
+"/* Return the source-id for this library */
+SQLITE_API const char *sqlite3_sourceid(void){ return SQLITE_SOURCE_ID; }"
+
+puts $out \
+"#endif /* SQLITE_AMALGAMATION */
+/************************** End of sqlite3.c ******************************/"
 
 close $out

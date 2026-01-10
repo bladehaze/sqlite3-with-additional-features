@@ -22,9 +22,9 @@ SQLITE_EXTENSION_INIT1
 ** most VFS calls to be recorded.
 **
 ** To use this module, first compile it as a loadable extension.  See
-** https://www.sqlite.org/loadext.html#build for compilations instructions.
+** https://sqlite.org/loadext.html#build for compilations instructions.
 **
-** After compliing, load this extension, then open database connections to be
+** After compiling, load this extension, then open database connections to be
 ** measured.  Query usages status using the vfsstat virtual table:
 **
 **         SELECT * FROM vfsstat;
@@ -775,6 +775,11 @@ static sqlite3_module VfsStatModule = {
   0,                         /* xRollback */
   0,                         /* xFindMethod */
   0,                         /* xRename */
+  0,                         /* xSavepoint */
+  0,                         /* xRelease */
+  0,                         /* xRollbackTo */
+  0,                         /* xShadowName */
+  0                          /* xIntegrity */
 };
 
 /*
@@ -806,12 +811,13 @@ int sqlite3_vfsstat_init(
   int rc = SQLITE_OK;
   SQLITE_EXTENSION_INIT2(pApi);
   vstat_vfs.pVfs = sqlite3_vfs_find(0);
+  if( vstat_vfs.pVfs==0 ) return SQLITE_ERROR;
   vstat_vfs.base.szOsFile = sizeof(VStatFile) + vstat_vfs.pVfs->szOsFile;
   rc = sqlite3_vfs_register(&vstat_vfs.base, 1);
   if( rc==SQLITE_OK ){
     rc = vstatRegister(db, pzErrMsg, pApi);
     if( rc==SQLITE_OK ){
-      rc = sqlite3_auto_extension(vstatRegister);
+      rc = sqlite3_auto_extension((void(*)(void))vstatRegister);
     }
   }
   if( rc==SQLITE_OK ) rc = SQLITE_OK_LOAD_PERMANENTLY;

@@ -418,7 +418,139 @@ execsql_test 7.$tn.9 "
 "
 }
 
+==========
 
+execsql_test 8.0 {
+  DROP TABLE IF EXISTS tx;
+  CREATE TABLE tx(a INTEGER PRIMARY KEY);
+  INSERT INTO tx VALUES(1), (2), (3), (4), (5), (6);
+
+  DROP TABLE IF EXISTS map;
+  CREATE TABLE map(v INTEGER PRIMARY KEY, t TEXT);
+  INSERT INTO map VALUES
+    (1, 'odd'), (2, 'even'), (3, 'odd'), 
+    (4, 'even'), (5, 'odd'), (6, 'even');
+}
+
+execsql_test 8.1 {
+  SELECT sum(a) OVER (
+    PARTITION BY (
+      SELECT t FROM map WHERE v=a
+    ) ORDER BY a
+  ) FROM tx;
+}
+
+execsql_test 8.2 {
+  SELECT sum(a) OVER win FROM tx
+  WINDOW win AS (
+    PARTITION BY (
+      SELECT t FROM map WHERE v=a
+    ) ORDER BY a
+  );
+}
+
+execsql_test 8.3 {
+  WITH map2 AS (
+    SELECT * FROM map
+  )
+  SELECT sum(a) OVER (
+    PARTITION BY (
+      SELECT t FROM map2 WHERE v=a
+    ) ORDER BY a
+  ) FROM tx;
+}
+
+execsql_test 8.4 {
+  WITH map2 AS (
+    SELECT * FROM map
+  )
+  SELECT sum(a) OVER win FROM tx
+  WINDOW win AS (
+    PARTITION BY (
+      SELECT t FROM map2 WHERE v=a
+    ) ORDER BY a
+  );
+}
+
+==========
+
+execsql_test 9.1 {
+  DROP TABLE IF EXISTS t1;
+  DROP TABLE IF EXISTS t2;
+  CREATE TABLE t1(a INTEGER);
+  CREATE TABLE t2(y INTEGER);
+}
+
+execsql_test 9.2 {
+  SELECT (
+    SELECT max(a) OVER ( ORDER BY (SELECT sum(a) FROM t1) )
+         + min(a) OVER() 
+  )
+  FROM t1
+}
+
+==========
+
+execsql_test 10.0 {
+  DROP TABLE IF EXISTS t1;
+  CREATE TABLE t1(a INTEGER, b INTEGER);
+  INSERT INTO t1 VALUES (10, 1), 
+                        (20, -1), 
+                        (5, 2), 
+                        (15, 0), 
+                        (25, 3);
+}
+
+execsql_test 10.1 {
+  SELECT 
+    a, b, MIN(a) FILTER(WHERE b > 0) OVER win 
+    FROM t1
+    WINDOW win AS (ORDER BY a ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING);
+}
+
+execsql_test 10.2 {
+  SELECT 
+    a, b, MIN(a) FILTER(WHERE b > 0) OVER win 
+    FROM t1
+    WINDOW win AS ();
+}
+
+execsql_test 10.3 {
+  SELECT 
+    a, b, MIN(a) FILTER(WHERE b > 0) OVER win 
+    FROM t1
+    WINDOW win AS (ORDER BY a);
+}
+
+execsql_test 10.4 {
+  SELECT 
+    a, b, MIN(a) OVER win 
+    FROM t1
+    WINDOW win AS (ORDER BY a ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING);
+}
+
+==========
+
+execsql_test 11.0 {
+  DROP TABLE IF EXISTS t2;
+  CREATE TABLE t2(a INTEGER, b INTEGER);
+  INSERT INTO t2 VALUES(1, 12);
+  INSERT INTO t2 VALUES(2, 10);
+  INSERT INTO t2 VALUES(3, 15);
+  INSERT INTO t2 VALUES(4, 22);
+  INSERT INTO t2 VALUES(5,  1);
+  INSERT INTO t2 VALUES(6,  4);
+  INSERT INTO t2 VALUES(7,  7);
+  INSERT INTO t2 VALUES(8,  6);
+  INSERT INTO t2 VALUES(9, 22);
+  INSERT INTO t2 VALUES(10, 2);
+}
+
+execsql_test 11.1 {
+  SELECT a, min(b) FILTER (WHERE a%2 != 0) OVER win
+  FROM t2
+  WINDOW win AS (ORDER BY a ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING);
+}
 
 finish_test
 

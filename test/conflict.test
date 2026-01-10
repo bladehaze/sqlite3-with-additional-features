@@ -813,7 +813,7 @@ do_test conflict-13.1 {
   catchsql {
     REPLACE INTO t13 VALUES(2);
   }
-} {1 {CHECK constraint failed: t13}}
+} {1 {CHECK constraint failed: a!=2}}
 verify_ex_errcode conflict-13.1b SQLITE_CONSTRAINT_CHECK
 do_test conflict-13.2 {
   execsql {
@@ -824,7 +824,7 @@ do_test conflict-13.2 {
 } {1 3}
 
 
-# Ticket https://www.sqlite.org/src/tktview/e6f1f2e34dceeb1ed61531c7e9
+# Ticket https://sqlite.org/src/tktview/e6f1f2e34dceeb1ed61531c7e9
 # Verify that it is not possible to sneak a NULL value into a NOT NULL
 # column using REPLACE.
 #
@@ -856,5 +856,36 @@ do_catchsql_test conflict-15.20 {
 do_execsql_test conflict-15.30 {
   SELECT * FROM t1;
 } {1}
+
+# 2023-01-16 https://sqlite.org/forum/forumpost/aa580a5af38a58e3
+# The parser accepts an ON CONFLICT clause on table CHECK constraints
+# but not on column CHECK constraints.  But the CHECK constraint is
+# ignored.  It has been like this since version 3.0.0.
+#
+# There might be applications and/or databases in the wild that have
+# table CHECK constraints with ON CONFLICT clauses.  In as much as this
+# is a harmless quirk, we continue to support it in order to avoid
+# breaking those legacy applications and databases.
+#
+reset_db
+do_catchsql_test conflict-16.1 {
+  -- ON CONFLICT clauses are not allowed on column CHECK constraints
+  CREATE TABLE t1(a INT CHECK( a!=5 ) ON CONFLICT ignore);
+} {1 {near "ON": syntax error}}
+do_execsql_test conflict-16.2 {
+  -- ON CONFLICT is allowed on table CHECK constraints
+  CREATE TABLE t1(a INT, CHECK( a!=5 ) ON CONFLICT ignore);
+} {}
+do_catchsql_test conflict-16.3 {
+  -- The ON CONFLICT clause is in-op
+  INSERT INTO t1(a) VALUES(4),(5),(6);
+} {1 {CHECK constraint failed: a!=5}}
+do_execsql_test conflict-16.4 {
+  SELECT a FROM t1 ORDER BY a;
+} {}
+do_execsql_test conflict-16.5 {
+  INSERT OR IGNORE INTO t1(a) VALUES(4),(5),(6);
+  SELECT a FROM t1 ORDER BY a;
+} {4 6}
 
 finish_test

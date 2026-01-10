@@ -188,7 +188,8 @@ static int fts3tokConnectMethod(
 
   assert( (rc==SQLITE_OK)==(pMod!=0) );
   if( rc==SQLITE_OK ){
-    const char * const *azArg = (const char * const *)&azDequote[1];
+    const char * const *azArg = 0;
+    if( nDequote>1 ) azArg = (const char * const *)&azDequote[1];
     rc = pMod->xCreate((nDequote>1 ? nDequote-1 : 0), azArg, &pTok);
   }
 
@@ -345,7 +346,7 @@ static int fts3tokFilterMethod(
   fts3tokResetCursor(pCsr);
   if( idxNum==1 ){
     const char *zByte = (const char *)sqlite3_value_text(apVal[0]);
-    int nByte = sqlite3_value_bytes(apVal[0]);
+    sqlite3_int64 nByte = sqlite3_value_bytes(apVal[0]);
     pCsr->zInput = sqlite3_malloc64(nByte+1);
     if( pCsr->zInput==0 ){
       rc = SQLITE_NOMEM;
@@ -419,7 +420,7 @@ static int fts3tokRowidMethod(
 ** Register the fts3tok module with database connection db. Return SQLITE_OK
 ** if successful or an error code if sqlite3_create_module() fails.
 */
-int sqlite3Fts3InitTok(sqlite3 *db, Fts3Hash *pHash){
+int sqlite3Fts3InitTok(sqlite3 *db, Fts3Hash *pHash, void(*xDestroy)(void*)){
   static const sqlite3_module fts3tok_module = {
      0,                           /* iVersion      */
      fts3tokConnectMethod,        /* xCreate       */
@@ -444,11 +445,14 @@ int sqlite3Fts3InitTok(sqlite3 *db, Fts3Hash *pHash){
      0,                           /* xSavepoint    */
      0,                           /* xRelease      */
      0,                           /* xRollbackTo   */
-     0                            /* xShadowName   */
+     0,                           /* xShadowName   */
+     0                            /* xIntegrity    */
   };
   int rc;                         /* Return code */
 
-  rc = sqlite3_create_module(db, "fts3tokenize", &fts3tok_module, (void*)pHash);
+  rc = sqlite3_create_module_v2(
+      db, "fts3tokenize", &fts3tok_module, (void*)pHash, xDestroy
+  );
   return rc;
 }
 

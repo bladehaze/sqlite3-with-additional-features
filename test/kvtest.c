@@ -161,7 +161,7 @@ static const char zHelp[] =
 #endif
 
 /*
-** Show thqe help text and quit.
+** Show the help text and quit.
 */
 static void showHelp(void){
   fprintf(stdout, "%s", zHelp);
@@ -907,7 +907,7 @@ static int runMain(int argc, char **argv){
   if( eType==PATH_DB ){
     /* Recover any prior crashes prior to starting the timer */
     sqlite3_open(zDb, &db);
-    sqlite3_exec(db, "SELECT rowid FROM sqlite_master LIMIT 1", 0, 0, 0);
+    sqlite3_exec(db, "SELECT rowid FROM sqlite_schema LIMIT 1", 0, 0, 0);
     sqlite3_close(db);
     db = 0;
   }

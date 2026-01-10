@@ -38,6 +38,9 @@ integrity_check without_rowid1-1.0ic
 do_execsql_test_if_vtab without_rowid1-1.0ixi {
   SELECT name, key FROM pragma_index_xinfo('t1');
 } {c 1 a 1 b 0 d 0}
+do_execsql_test_if_vtab without_rowid1-1.0tl {
+  SELECT wr FROM pragma_table_list('t1');
+} {1}
 
 do_execsql_test without_rowid1-1.1 {
   SELECT *, '|' FROM t1 ORDER BY +c, a;
@@ -341,7 +344,7 @@ do_execsql_test 7.1 {
 } {}
 do_catchsql_test 7.2 {
   INSERT INTO t70a(rowid,a,b) VALUES(33,99,'xyzzy');
-} {1 {CHECK constraint failed: t70a}}
+} {1 {CHECK constraint failed: rowid!=33}}
 do_catchsql_test 7.3 {
   CREATE TABLE t70b(
      a INT CHECK( rowid!=33 ),
@@ -412,7 +415,7 @@ do_execsql_test 10.6 {
   SELECT * FROM t1;
 } {b a 3  b b 4}
 
-# 2019-04-29 ticket https://www.sqlite.org/src/info/3182d3879020ef3
+# 2019-04-29 ticket https://sqlite.org/src/info/3182d3879020ef3
 do_execsql_test 11.1 {
   CREATE TABLE t11(a TEXT PRIMARY KEY, b INT) WITHOUT ROWID;
   CREATE INDEX t11a ON t11(a COLLATE NOCASE);
@@ -421,7 +424,7 @@ do_execsql_test 11.1 {
   SELECT a FROM t11 ORDER BY a COLLATE binary;
 } {ok A a}
 
-# 2019-05-13 ticket https://www.sqlite.org/src/info/bba7b69f9849b5b
+# 2019-05-13 ticket https://sqlite.org/src/info/bba7b69f9849b5b
 do_execsql_test 12.1 {
   DROP TABLE IF EXISTS t0;
   CREATE TABLE t0 (c0 INTEGER PRIMARY KEY DESC, c1 UNIQUE DEFAULT NULL) WITHOUT ROWID;
@@ -430,7 +433,7 @@ do_execsql_test 12.1 {
   PRAGMA integrity_check;
 } {ok}
 
-# 2019-11-07 ticket https://www.sqlite.org/src/info/302027baf1374498
+# 2019-11-07 ticket https://sqlite.org/src/info/302027baf1374498
 # The xferCompatibleIndex() function confuses a PRIMARY KEY index
 # with a UNIQUE index.
 #
@@ -452,5 +455,65 @@ do_execsql_test 13.10 {
   PRAGMA integrity_check;
   SELECT * FROM t0, t1;
 } {ok abc xyz abc xyz}
-  
+
+# 2021-05-13 https://sqlite.org/forum/forumpost/6c8960f545
+reset_db
+ifcapable altertable {
+  do_execsql_test 14.1 {
+    CREATE TABLE t1(a INT PRIMARY KEY) WITHOUT ROWID;
+    INSERT INTO t1(a) VALUES(10);
+    ALTER TABLE t1 ADD COLUMN b INT;
+    SELECT * FROM t1 WHERE a=20 OR (a=10 AND b=10);
+  } {}
+  do_execsql_test 14.2 {
+    CREATE TABLE dual AS SELECT 'X' AS dummy;
+    EXPLAIN QUERY PLAN SELECT * FROM dual, t1 WHERE a=10 AND b=10;
+  } {~/b=/}
+}
+
+# 2022-01-01 https://sqlite.org/forum/forumpost/b03d86f951 PoC #1
+# Omit an assert() from 2013 that no longer serves any purpose and
+# is no longer always true.
+#
+ifcapable altertable {
+  reset_db
+  do_execsql_test 15.1 {
+    PRAGMA writable_schema=ON;
+    CREATE TABLE sqlite_sequence (name PRIMARY KEY) WITHOUT ROWID;
+    PRAGMA writable_schema=OFF;
+    CREATE TABLE c1(x);
+    INSERT INTO sqlite_sequence(name) VALUES('c0'),('c1'),('c2');
+    ALTER TABLE c1 RENAME TO a;
+    SELECT name FROM sqlite_sequence ORDER BY +name;
+  } {a c0 c2}
+}
+
+# Ensure that the number of columns in an index on a WITHOUT ROWID
+# table does not exceed SQLITE_LIMIT_COLUMN.
+#
+reset_db
+sqlite3_limit db SQLITE_LIMIT_COLUMN 8
+do_execsql_test 16.1 {
+  CREATE TABLE t1(
+    c1,c2,c3,c4,c5,c6,c7,c8,
+    PRIMARY KEY(c1,c2,c1 COLLATE NOCASE)
+  ) WITHOUT ROWID;
+} {}
+do_execsql_test 16.2 {
+  CREATE TABLE t2(
+    c1,c2,c3,c4,c5,c6,c7,c8,
+    PRIMARY KEY(c1 COLLATE nocase,c1 COLLATE rtrim,
+                c2 COLLATE nocase,c2 COLLATE rtrim,
+                c3 COLLATE nocase,c3 COLLATE rtrim,
+                c4 COLLATE nocase,c4 COLLATE rtrim)
+  ) WITHOUT ROWID;
+} {}
+do_execsql_test 16.3 {
+  CREATE TABLE t3(
+    c1,c2,c3,c4,c5,c6,c7,c8,
+    PRIMARY KEY(c1,c2),
+    UNIQUE(c3,c4,c5,c6,c7,c8,c3 COLLATE nocase)
+  ) WITHOUT ROWID;
+} {}
+
 finish_test

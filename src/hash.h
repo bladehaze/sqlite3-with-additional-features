@@ -60,6 +60,7 @@ struct HashElem {
   HashElem *next, *prev;       /* Next and previous elements in the table */
   void *data;                  /* Data associated with this element */
   const char *pKey;            /* Key associated with this element */
+  unsigned int h;              /* hash for pKey */
 };
 
 /*
@@ -91,6 +92,6 @@ void sqlite3HashClear(Hash*);
 /*
 ** Number of entries in a hash table
 */
-/* #define sqliteHashCount(H)  ((H)->count) // NOT USED */
+#define sqliteHashCount(H)  ((H)->count)
 
 #endif /* SQLITE_HASH_H */

@@ -1339,11 +1339,11 @@ do_eqp_test 4.1.2 {
   QUERY PLAN
   `--MERGE (UNION ALL)
      |--LEFT
-     |  |--SCAN TABLE t5 USING INDEX i2
-     |  `--USE TEMP B-TREE FOR RIGHT PART OF ORDER BY
+     |  |--SCAN t5 USING INDEX i2
+     |  `--USE TEMP B-TREE FOR LAST TERM OF ORDER BY
      `--RIGHT
-        |--SCAN TABLE t4 USING INDEX i1
-        `--USE TEMP B-TREE FOR RIGHT PART OF ORDER BY
+        |--SCAN t4 USING INDEX i1
+        `--USE TEMP B-TREE FOR LAST TERM OF ORDER BY
 }
 
 do_execsql_test 4.1.3 {
@@ -1445,6 +1445,66 @@ do_execsql_test 6.1 {
   INSERT INTO t2(b) VALUES('12345');
   SELECT * FROM (SELECT a FROM t1 UNION SELECT b FROM t2) WHERE a=a;
 } {12345}
+
+# 2020-06-15 ticket 8f157e8010b22af0
+#
+reset_db
+do_execsql_test 7.1 {
+  CREATE TABLE t1(c1);     INSERT INTO t1 VALUES(12),(123),(1234),(NULL),('abc');
+  CREATE TABLE t2(c2);     INSERT INTO t2 VALUES(44),(55),(123);
+  CREATE TABLE t3(c3,c4);  INSERT INTO t3 VALUES(66,1),(123,2),(77,3);
+  CREATE VIEW t4 AS SELECT c3 FROM t3;
+  CREATE VIEW t5 AS SELECT c3 FROM t3 ORDER BY c4;
+}
+do_execsql_test 7.2 {
+  SELECT * FROM t1, t2 WHERE c1=(SELECT 123 INTERSECT SELECT c2 FROM t4) AND c1=123;
+} {123 123}
+do_execsql_test 7.3 {
+  SELECT * FROM t1, t2 WHERE c1=(SELECT 123 INTERSECT SELECT c2 FROM t5) AND c1=123;
+} {123 123}
+do_execsql_test 7.4 {
+  CREATE TABLE a(b);
+  CREATE VIEW c(d) AS SELECT b FROM a ORDER BY b;
+  SELECT sum(d) OVER( PARTITION BY(SELECT 0 FROM c JOIN a WHERE b =(SELECT b INTERSECT SELECT d FROM c) AND b = 123)) FROM c;
+} {}
+
+#-------------------------------------------------------------------------
+reset_db
+do_execsql_test 8.0 {
+  CREATE TABLE x1(x);
+  CREATE TABLE t1(a, b, c, d);
+  CREATE INDEX t1a ON t1(a);
+  CREATE INDEX t1b ON t1(b);
+}
+
+do_execsql_test 8.1 {
+      SELECT 'ABCD' FROM t1 
+      WHERE (a=? OR b=?) 
+      AND (0 OR (SELECT 'xyz' INTERSECT SELECT a ORDER BY 1))
+} {}
+
+#-------------------------------------------------------------------------
+# dbsqlfuzz a34f455c91ad75a0cf8cd9476841903f42930a7a
+#
+reset_db
+do_execsql_test 9.0 {
+  CREATE TABLE t1(a COLLATE nocase);
+  CREATE TABLE t2(b COLLATE nocase);
+
+  INSERT INTO t1 VALUES('ABC');
+  INSERT INTO t2 VALUES('abc');
+}
+
+do_execsql_test 9.1 {
+  SELECT a FROM t1 INTERSECT SELECT b FROM t2;
+} {ABC}
+
+do_execsql_test 9.2 {
+  SELECT * FROM (
+      SELECT a FROM t1 INTERSECT SELECT b FROM t2
+  ) WHERE a||'' = 'ABC';
+} {ABC}
+
 
 
 finish_test

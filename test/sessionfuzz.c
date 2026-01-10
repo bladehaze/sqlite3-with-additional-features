@@ -60,19 +60,12 @@
 
 #define SQLITE_DEBUG 1
 #define SQLITE_THREADSAFE 0
+#undef SQLITE_OMIT_LOAD_EXTENSION
 #define SQLITE_OMIT_LOAD_EXTENSION 0
 #define SQLITE_ENABLE_SESSION 1
 #define SQLITE_ENABLE_PREUPDATE_HOOK 1
 #define SQLITE_ENABLE_DESERIALIZE 1
 #include "sqlite3.c"
-
-/* Create a test database.  This will be an in-memory database */
-static const char zInitSql[] = 
-  "CREATE TABLE t1(a INTEGER PRIMARY KEY,b,c,d);\n"
-  "CREATE TABLE t2(e TEXT PRIMARY KEY NOT NULL,f,g);\n"
-  "CREATE TABLE t3(w REAL PRIMARY KEY NOT NULL,x,y);\n"
-  "CREATE TABLE t4(z PRIMARY KEY) WITHOUT ROWID;\n"
-;
 
 /* Code to populate the database */
 static const char zFillSql[] = 
@@ -698,7 +691,9 @@ static const char zHelp[] =
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
-#include "zlib.h"
+#ifndef OMIT_ZLIB
+#include <zlib.h>
+#endif
 
 /*
 ** Implementation of the "sqlar_uncompress(X,SZ)" SQL function
@@ -715,6 +710,9 @@ static void sqlarUncompressFunc(
   int argc,
   sqlite3_value **argv
 ){
+#ifdef OMIT_ZLIB
+  sqlite3_result_value(context, argv[0]);
+#else
   uLong nData;
   uLongf sz;
 
@@ -733,6 +731,7 @@ static void sqlarUncompressFunc(
     }
     sqlite3_free(pOut);
   }
+#endif
 }
 
 

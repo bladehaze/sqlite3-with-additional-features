@@ -30,12 +30,11 @@ proc is_distinct_noop {sql} {
   set program1 [list]
   set program2 [list]
   db eval "EXPLAIN $sql1" {
-    if {$opcode != "Noop"} { lappend program1 $opcode }
+    if {$opcode != "Noop" && $opcode != "Explain"} { lappend program1 $opcode }
   }
   db eval "EXPLAIN $sql2" {
-    if {$opcode != "Noop"} { lappend program2 $opcode }
+    if {$opcode != "Noop" && $opcode != "Explain"} { lappend program2 $opcode }
   }
-
   return [expr {$program1==$program2}]
 }
 
@@ -51,8 +50,8 @@ proc do_temptables_test {tn sql temptables} {
     set ret ""
     db eval "EXPLAIN [set sql]" {
       if {$opcode == "OpenEphemeral" || $opcode == "SorterOpen"} { 
-        if {$p5 != "08" && $p5!="00"} { error "p5 = $p5" }
-        if {$p5 == "08"} {
+        if {$p5!=8 && $p5!=0} { error "p5 = $p5" }
+        if {$p5==8} {
           lappend ret hash
         } else {
           lappend ret btree
@@ -128,7 +127,6 @@ foreach {tn noop sql} {
   21  0   "SELECT DISTINCT c2 FROM t3"
 
   22  0   "SELECT DISTINCT * FROM (SELECT 1, 2, 3 UNION SELECT 4, 5, 6)"
-  23  1   "SELECT DISTINCT rowid FROM (SELECT 1, 2, 3 UNION SELECT 4, 5, 6)"
 
   24  0   "SELECT DISTINCT rowid/2 FROM t1"
   25  1   "SELECT DISTINCT rowid/2, rowid FROM t1"
@@ -293,5 +291,118 @@ do_execsql_test 7.1 {
     t4 CROSS JOIN t3 CROSS JOIN t1 
   WHERE (t1.a=t3.a) AND (SELECT count(*) FROM t2 AS y WHERE t4.x!='abc')=t1.a
 } {2 2 2}
+
+# 2021-04-06 forum post https://sqlite.org/forum/forumpost/66954e9ece
+reset_db
+do_execsql_test 8.0 {
+  CREATE TABLE person ( pid INT) ;
+  CREATE UNIQUE INDEX idx ON person ( pid ) WHERE pid == 1;
+  INSERT INTO person VALUES (1), (10), (10);
+  SELECT DISTINCT pid FROM person where pid = 10;
+} {10}
+
+#-------------------------------------------------------------------------
+reset_db
+do_execsql_test 9.0 {
+  CREATE TABLE t1(a, b);
+  INSERT INTO t1 VALUES('a', 'a');
+  INSERT INTO t1 VALUES('a', 'b');
+  INSERT INTO t1 VALUES('a', 'c');
+
+  INSERT INTO t1 VALUES('b', 'a');
+  INSERT INTO t1 VALUES('b', 'b');
+  INSERT INTO t1 VALUES('b', 'c');
+
+  INSERT INTO t1 VALUES('a', 'a');
+  INSERT INTO t1 VALUES('b', 'b');
+
+  INSERT INTO t1 VALUES('A', 'A');
+  INSERT INTO t1 VALUES('B', 'B');
+}
+
+foreach {tn idx} {
+  1 { }
+  2 { CREATE INDEX i1 ON t1(a, b); }
+  3 { CREATE INDEX i1 ON t1(b, a); }
+  4 { CREATE INDEX i1 ON t1(a COLLATE nocase, b COLLATE nocase); }
+  5 { CREATE INDEX i1 ON t1(b COLLATE nocase, a COLLATE nocase); }
+} {
+
+  execsql { DROP INDEX IF EXISTS i1 }
+  execsql $idx
+  
+  do_execsql_test 9.$tn.1 {
+    SELECT DISTINCT a, b FROM t1 ORDER BY a, b
+  } {
+    A A  B B
+    a a  a b  a c
+    b a  b b  b c
+  }
+
+  do_execsql_test 9.$tn.1 {
+    SELECT DISTINCT a COLLATE nocase, b COLLATE nocase FROM t1 
+    ORDER BY a COLLATE nocase, b COLLATE nocase
+  } {
+    a a  a b  a c
+    b a  b b  b c
+  }
+}
+
+# 2023-03-16
+# https://sqlite.org/forum/forumpost/16ce2bb7a639e29b
+# ticket c36cdb4afd504dc1
+# ticket 4051a7f931d9ba24
+# ticket d6fd512f50513ab7
+#
+do_execsql_test 10.1 {
+  SELECT  DISTINCT
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1
+  ORDER  BY
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x';
+} {1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1}
+do_execsql_test 10.2 {
+  EXPLAIN
+  SELECT  DISTINCT
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1
+  ORDER  BY
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x','x','x','x','x','x','x',
+   'x','x','x','x';
+} {/0 Init 0 /}
+do_execsql_test 10.3 {
+  EXPLAIN  CREATE  TABLE t2 AS  SELECT  DISTINCT ':memory:', 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7 ORDER  BY '%J%j%w%s', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', '%J%j%w%s', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 42e-300, 'unixepoch', 'unixepoch', 'unixepoch' LIMIT 0xda;
+} {/0 Init 0/}
+do_execsql_test 10.4 {
+  DROP TABLE IF EXISTS t0;
+  CREATE  TABLE t0 AS  SELECT  DISTINCT 0xda, 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 0xda-0xda-42e-300, 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0', 'lit0' ORDER  BY '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%Y-%m-%d', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', 'lit0', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', 'auto', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', ':memory:', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '%%', '';
+  SELECT count(*) FROM t0;
+} {1}
+do_execsql_test 10.5 {
+  DROP TABLE IF EXISTS t2;
+  CREATE  TABLE t2 AS  SELECT  DISTINCT ':memory:', 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 0.0*7/0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7 ORDER  BY '%J%j%w%s', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', '%J%j%w%s', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 'unixepoch', 42e-300, 'unixepoch', 'unixepoch', 'unixepoch' LIMIT 0xda;
+  SELECT count(*) FROM t2;
+} {1}
 
 finish_test

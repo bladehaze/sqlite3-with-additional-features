@@ -220,7 +220,7 @@ static int wholenumberBestIndex(
     pIdxInfo->orderByConsumed = 1;
   }
   if( (idxNum & 12)==0 ){
-    pIdxInfo->estimatedCost = (double)100000000;
+    pIdxInfo->estimatedCost = 1e99;
   }else if( (idxNum & 3)==0 ){
     pIdxInfo->estimatedCost = (double)5;
   }else{
@@ -254,6 +254,11 @@ static sqlite3_module wholenumberModule = {
   0,                         /* xRollback */
   0,                         /* xFindMethod */
   0,                         /* xRename */
+  0,                         /* xSavepoint */
+  0,                         /* xRelease */
+  0,                         /* xRollbackTo */
+  0,                         /* xShadowName */
+  0                          /* xIntegrity */
 };
 
 #endif /* SQLITE_OMIT_VIRTUALTABLE */

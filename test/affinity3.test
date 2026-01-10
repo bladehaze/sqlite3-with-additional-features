@@ -11,14 +11,14 @@
 #
 # Test cases for bugs:
 #
-#    https://www.sqlite.org/src/info/91e2e8ba6ff2e2
-#    https://www.sqlite.org/src/info/7ffd1ca1d2ad4ecf
+#    https://sqlite.org/src/info/91e2e8ba6ff2e2
+#    https://sqlite.org/src/info/7ffd1ca1d2ad4ecf
 #
 
 set testdir [file dirname $argv0]
 source $testdir/tester.tcl
 
-# Ticket https://www.sqlite.org/src/info/91e2e8ba6ff2e2 (2011-09-19)
+# Ticket https://sqlite.org/src/info/91e2e8ba6ff2e2 (2011-09-19)
 # Automatic index causes undesired type conversions
 #
 do_execsql_test affinity3-100 {
@@ -30,10 +30,23 @@ do_execsql_test affinity3-100 {
   FROM customer c
   LEFT JOIN apr i ON i.id=c.id;
   
+  CREATE VIEW v1rj AS
+  SELECT c.id, i.apr
+  FROM apr i
+  RIGHT JOIN customer c ON i.id=c.id;
+  
   CREATE VIEW v2 AS
   SELECT c.id, v1.apr
   FROM customer c
   LEFT JOIN v1 ON v1.id=c.id;
+  
+  CREATE VIEW v2rj AS
+  SELECT c.id, v1.apr
+  FROM v1 RIGHT JOIN customer c ON v1.id=c.id;
+  
+  CREATE VIEW v2rjrj AS
+  SELECT c.id, v1rj.apr
+  FROM v1rj RIGHT JOIN customer c ON v1rj.id=c.id;
   
   INSERT INTO customer (id) VALUES (1);
   INSERT INTO apr (id, apr) VALUES (1, 12);
@@ -44,18 +57,37 @@ do_execsql_test affinity3-110 {
   PRAGMA automatic_index=ON;
   SELECT id, (apr / 100), typeof(apr) apr_type  FROM v1;
 } {1 0.12 real 2 0.1201 real}
+do_execsql_test affinity3-111 {
+  PRAGMA automatic_index=ON;
+  SELECT id, (apr / 100), typeof(apr) apr_type  FROM v1rj;
+} {1 0.12 real 2 0.1201 real}
 do_execsql_test affinity3-120 {
   SELECT id, (apr / 100), typeof(apr) apr_type  FROM v2;
+} {1 0.12 real 2 0.1201 real}
+do_execsql_test affinity3-121 {
+  SELECT id, (apr / 100), typeof(apr) apr_type  FROM v2rj;
+} {1 0.12 real 2 0.1201 real}
+do_execsql_test affinity3-122 {
+  SELECT id, (apr / 100), typeof(apr) apr_type  FROM v2rjrj;
 } {1 0.12 real 2 0.1201 real}
 do_execsql_test affinity3-130 {
   PRAGMA automatic_index=OFF;
   SELECT id, (apr / 100), typeof(apr) apr_type  FROM v1;
 } {1 0.12 real 2 0.1201 real}
+do_execsql_test affinity3-131 {
+  SELECT id, (apr / 100), typeof(apr) apr_type  FROM v1rj;
+} {1 0.12 real 2 0.1201 real}
 do_execsql_test affinity3-140 {
   SELECT id, (apr / 100), typeof(apr) apr_type  FROM v2;
 } {1 0.12 real 2 0.1201 real}
+do_execsql_test affinity3-141 {
+  SELECT id, (apr / 100), typeof(apr) apr_type  FROM v2rj;
+} {1 0.12 real 2 0.1201 real}
+do_execsql_test affinity3-142 {
+  SELECT id, (apr / 100), typeof(apr) apr_type  FROM v2rjrj;
+} {1 0.12 real 2 0.1201 real}
 
-# Ticket https://www.sqlite.org/src/info/7ffd1ca1d2ad4ecf  (2017-01-16)
+# Ticket https://sqlite.org/src/info/7ffd1ca1d2ad4ecf  (2017-01-16)
 # Incorrect affinity when using automatic indexes 
 #
 do_execsql_test affinity3-200 {
@@ -75,17 +107,17 @@ do_execsql_test affinity3-200 {
 do_execsql_test affinity3-210 {
   PRAGMA automatic_index=ON;
   SELECT * FROM data JOIN idmap USING(id);
-} {1 abc a 4 xyz e}
+} {4 xyz e}
 do_execsql_test affinity3-220 {
   SELECT * FROM data JOIN mzed USING(id);
-} {1 abc a 4 xyz e}
+} {4 xyz e}
 
 do_execsql_test affinity3-250 {
   PRAGMA automatic_index=OFF;
   SELECT * FROM data JOIN idmap USING(id);
-} {1 abc a 4 xyz e}
+} {4 xyz e}
 do_execsql_test affinity3-260 {
   SELECT * FROM data JOIN mzed USING(id);
-} {1 abc a 4 xyz e}
+} {4 xyz e}
 
 finish_test

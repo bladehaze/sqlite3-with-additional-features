@@ -38,7 +38,7 @@ struct sqlite3_mutex {
   CRITICAL_SECTION mutex;    /* Mutex controlling the lock */
   int id;                    /* Mutex type */
 #ifdef SQLITE_DEBUG
-  volatile int nRef;         /* Number of enterances */
+  volatile int nRef;         /* Number of entrances */
   volatile DWORD owner;      /* Thread holding this mutex */
   volatile LONG trace;       /* True to trace changes */
 #endif
@@ -87,7 +87,7 @@ void sqlite3MemoryBarrier(void){
   SQLITE_MEMORY_BARRIER;
 #elif defined(__GNUC__)
   __sync_synchronize();
-#elif MSVC_VERSION>=1300
+#elif MSVC_VERSION>=1400
   _ReadWriteBarrier();
 #elif defined(MemoryBarrier)
   MemoryBarrier();
@@ -129,11 +129,7 @@ static int winMutexInit(void){
   if( InterlockedCompareExchange(&winMutex_lock, 1, 0)==0 ){
     int i;
     for(i=0; i<ArraySize(winMutex_staticMutexes); i++){
-#if SQLITE_OS_WINRT
-      InitializeCriticalSectionEx(&winMutex_staticMutexes[i].mutex, 0, 0);
-#else
       InitializeCriticalSection(&winMutex_staticMutexes[i].mutex);
-#endif
     }
     winMutex_isInit = 1;
   }else{
@@ -171,7 +167,7 @@ static int winMutexEnd(void){
 ** <ul>
 ** <li>  SQLITE_MUTEX_FAST
 ** <li>  SQLITE_MUTEX_RECURSIVE
-** <li>  SQLITE_MUTEX_STATIC_MASTER
+** <li>  SQLITE_MUTEX_STATIC_MAIN
 ** <li>  SQLITE_MUTEX_STATIC_MEM
 ** <li>  SQLITE_MUTEX_STATIC_OPEN
 ** <li>  SQLITE_MUTEX_STATIC_PRNG
@@ -223,11 +219,7 @@ static sqlite3_mutex *winMutexAlloc(int iType){
         p->trace = 1;
 #endif
 #endif
-#if SQLITE_OS_WINRT
-        InitializeCriticalSectionEx(&p->mutex, 0, 0);
-#else
         InitializeCriticalSection(&p->mutex);
-#endif
       }
       break;
     }

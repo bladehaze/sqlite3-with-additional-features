@@ -435,7 +435,7 @@ do_test 5.3.2 {
   for {set i 0} {$i < 20} {incr i} {
     execsql {
       INSERT INTO t6(content, lid) VALUES(
-        'I (row '||$i||') belong to langauge N!', $lid
+        'I (row '||$i||') belong to language N!', $lid
       );
     }
   }
@@ -499,7 +499,8 @@ do_execsql_test 6.0 {
 }
 do_execsql_test 6.1 {
   INSERT INTO vt0(vt0) VALUES('integrity-check');
-}
+  PRAGMA integrity_check;
+} {ok}
 do_execsql_test 6.2 {
   COMMIT;
   INSERT INTO vt0(vt0) VALUES('integrity-check');

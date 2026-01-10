@@ -110,7 +110,7 @@ do_test alter4-1.7 {
 } {{CREATE TABLE t3(a, b, c VARCHAR(10, 20), UNIQUE(a, b))}}
 do_test alter4-1.99 {
   catchsql {
-    # May not exist if foriegn-keys are omitted at compile time.
+    # May not exist if foreign-keys are omitted at compile time.
     DROP TABLE t2; 
   }
   execsql {
@@ -123,6 +123,7 @@ do_test alter4-1.99 {
 do_test alter4-2.1 {
   execsql {
     CREATE TABLE temp.t1(a, b);
+    INSERT INTO t1 VALUES(1,2);
   }
   catchsql {
     ALTER TABLE t1 ADD c PRIMARY KEY;
@@ -317,16 +318,16 @@ ifcapable trigger&&tempdb {
       END;
   
       INSERT INTO t1 VALUES(1, 2);
-      SELECT * FROM log;
+      SELECT * FROM log ORDER BY trig, a, b;
     }
-  } {b 1 2 a 1 2}
+  } {a 1 2 b 1 2}
   do_test alter4-6.2 {
     execsql {
       ALTER TABLE t1 ADD COLUMN c DEFAULT 'c';
       INSERT INTO t1(a, b) VALUES(3, 4);
-      SELECT * FROM log;
+      SELECT * FROM log ORDER BY trig, a, b;
     }
-  } {b 1 2 a 1 2 b 3 4 a 3 4}
+  } {a 1 2 a 3 4 b 1 2 b 3 4}
 }
 
 # Ticket #1183 - Make sure adding columns to large tables does not cause
@@ -378,7 +379,7 @@ do_execsql_test alter4-9.3 {
 # Confirm that doing an ALTER TABLE on a legacy format database
 # does not corrupt DESC indexes.
 #
-# Ticket https://www.sqlite.org/src/tktview/f68bf68513a1c
+# Ticket https://sqlite.org/src/tktview/f68bf68513a1c
 #
 do_test alter4-10.1 {
   db close
@@ -397,6 +398,7 @@ do_test alter4-10.1 {
 reset_db
 do_execsql_test alter4-11.0 {
   CREATE TABLE t1(c INTEGER PRIMARY KEY, d);
+  INSERT INTO t1(c,d) VALUES(1,2);
   PRAGMA foreign_keys = on;
   ALTER TABLE t1 ADD COLUMN e;
 }

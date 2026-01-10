@@ -8,6 +8,7 @@
 #    May you share freely, never taking more than you give.
 #
 #***********************************************************************
+# TESTRUNNER: shell
 #
 # Test the shell tool ".ar" command.
 #
@@ -19,7 +20,7 @@ set testprefix shell8
 ifcapable !vtab {
   finish_test; return
 }
-set CLI [test_find_cli]
+set CLI [test_cli_invocation]
 
 # Check to make sure the shell has been compiled with ".archive" support.
 #
@@ -44,13 +45,17 @@ proc populate_dir {dirname spec} {
   }
 }
 
+proc dir_content {dirname} {
+  lsort [glob -nocomplain $dirname/*]
+}
+
 proc dir_to_list {dirname {n -1}} {
   if {$n<0} {set n [llength [file split $dirname]]}
 
   set res [list]
   foreach f [glob -nocomplain $dirname/*] {
     set mtime [file mtime $f]
-    if {$::tcl_platform(platform)!="windows"} {
+    if {$::tcl_platform(platform) ne "windows"} {
       set perm [file attributes $f -perm]
     } else {
       set perm 0
@@ -160,7 +165,7 @@ foreach {tn tcl} {
   #
   # Because it is slow, only do this for $tn==1.
   if {$tn==1} {
-    do_test 1.$tn.1 {
+    do_test 1.$tn.4 {
       catchcmd test_ar.db $c1
       file delete -force ar1
       after 2000
@@ -170,8 +175,48 @@ foreach {tn tcl} {
   }
 }
 
-finish_test
+do_test 2.1.1 {
+  populate_dir ar2 {
+    file1 "abcd" 
+    file2 "efgh"
+    junk1 "j1"
+    junk2 "j2"
+    dir1/file3 "ijkl"
+  }
+  populate_dir ar4 {
+    file2 "efgh"
+  }
+  catchcmd shell8.db {.ar -c}
+  catchcmd shell8.db {.ar -C ar2 -i .}
+  catchcmd shell8.db {.ar -r ./file2 ./dir1}
+  catchcmd shell8.db {.ar -g -r ./ju*2}
+  catchcmd shell8.db {.ar -C ar4 -x .}
+  regsub -all {ar4} [dir_content ar4] ar2
+} {ar2/file1 ar2/file2 ar2/junk1}
 
+# Test symbolic links.
+#
+if {$tcl_platform(platform)=="unix"} {
+  populate_dir ar2 {
+    file1 "1234" 
+    file2 "3456"
+  }
+  file link ar2/link1 file1
 
+  forcedelete shell8.db
+  forcedelete link1
+
+  do_test 3.1 {
+    catchcmd shell8.db {.ar -C ar2 -c file2 link1 }
+  } {0 {}}
+
+  do_test 3.2 {
+    catchcmd shell8.db {.ar -x} 
+  } {0 {}}
+
+  do_test 3.3 {
+    catchcmd shell8.db {.ar -x} 
+  } {0 {}}
+}
 
 finish_test

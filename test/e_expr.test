@@ -84,12 +84,12 @@ db func regexp -argcount 2 regexfunc
 # in the documentation exist and that the relative precedences of the
 # operators are also as the documentation suggests.
 #
-# EVIDENCE-OF: R-15514-65163 SQLite understands the following binary
+# X-EVIDENCE-OF: R-15514-65163 SQLite understands the following binary
 # operators, in order from highest to lowest precedence: || * / % + -
 # << >> & | < <= > >= = == != <> IS IS
 # NOT IN LIKE GLOB MATCH REGEXP AND OR
 #
-# EVIDENCE-OF: R-38759-38789 Operators IS and IS NOT have the same
+# X-EVIDENCE-OF: R-38759-38789 Operators IS and IS NOT have the same
 # precedence as =.
 #
 
@@ -180,7 +180,7 @@ do_execsql_test e_expr-1.6 {
 # Check that the four unary prefix operators mentioned in the 
 # documentation exist.
 #
-# EVIDENCE-OF: R-13958-53419 Supported unary prefix operators are these:
+# X-EVIDENCE-OF: R-13958-53419 Supported unary prefix operators are these:
 # - + ~ NOT
 #
 do_execsql_test e_expr-2.1 { SELECT -   10   } {-10}
@@ -215,7 +215,7 @@ foreach {tn literal type} {
 #
 # EVIDENCE-OF: R-03679-60639 Equals can be either = or ==.
 #
-# EVIDENCE-OF: R-30082-38996 The non-equals operator can be either != or
+# EVIDENCE-OF: R-49372-18364 The not-equal operator can be either != or
 # <>.
 #
 foreach {tn literal different} {
@@ -254,8 +254,9 @@ foreach {tn a b} {
 #-------------------------------------------------------------------------
 # Test the % operator.
 #
-# EVIDENCE-OF: R-04223-04352 The operator % outputs the integer value of
-# its left operand modulo its right operand.
+# EVIDENCE-OF: R-53431-59159 The % operator casts both of its operands
+# to type INTEGER and then computes the remainder after dividing the
+# left integer by the right integer.
 #
 do_execsql_test e_expr-6.1 {SELECT  72%5}  {2}
 do_execsql_test e_expr-6.2 {SELECT  72%-5} {2}
@@ -264,13 +265,10 @@ do_execsql_test e_expr-6.4 {SELECT -72%5}  {-2}
 do_execsql_test e_expr-6.5 {SELECT 72.35%5} {2.0}
 
 #-------------------------------------------------------------------------
-# Test that the results of all binary operators are either numeric or 
-# NULL, except for the || operator, which may evaluate to either a text
-# value or NULL.
-#
-# EVIDENCE-OF: R-20665-17792 The result of any binary operator is either
-# a numeric value or NULL, except for the || concatenation operator
-# which always evaluates to either NULL or a text value.
+# EVIDENCE-OF: R-15904-00746 The result of any binary operator is either
+# a numeric value or NULL, except for the || concatenation operator, and
+# the -> and ->> extract operators which evaluate to either
+# NULL or a text value.
 #
 set literals {
   1 'abc'        2 'hexadecimal'       3 ''
@@ -280,6 +278,10 @@ set literals {
  13     NULL
 }
 foreach op $oplist {
+  if {$op eq "AND" || $op eq "OR"} {
+    # These tests do not work with AND and OR due to short-circuit evaluation
+    continue
+  }
   foreach {n1 rhs} $literals { 
   foreach {n2 lhs} $literals {
 
@@ -367,7 +369,7 @@ db collate reverse reverse_collate
 # EVIDENCE-OF: R-59577-33471 The COLLATE operator is a unary postfix
 # operator that assigns a collating sequence to an expression.
 #
-# EVIDENCE-OF: R-36231-30731 The COLLATE operator has a higher
+# X-EVIDENCE-OF: R-36231-30731 The COLLATE operator has a higher
 # precedence (binds more tightly) than any binary operator and any unary
 # prefix operator except "~".
 #
@@ -859,7 +861,7 @@ foreach {tn x expr res nEval} {
   } [list $nEval $res]
 }
 
-# EVIDENCE-OF: R-05155-34454 The precedence of the BETWEEN operator is
+# X-EVIDENCE-OF: R-05155-34454 The precedence of the BETWEEN operator is
 # the same as the precedence as operators == and != and LIKE and groups
 # left to right.
 # 
@@ -1139,7 +1141,7 @@ sqlite3 db test.db
 #-------------------------------------------------------------------------
 # Test cases for the testable statements related to the CASE expression.
 #
-# EVIDENCE-OF: R-15199-61389 There are two basic forms of the CASE
+# EVIDENCE-OF: R-57495-24088 There are two fundamental forms of the CASE
 # expression: those with a base expression and those without.
 #
 do_execsql_test e_expr-20.1 {
@@ -1234,12 +1236,18 @@ db nullvalue {}
 # EVIDENCE-OF: R-13943-13592 A NULL result is considered untrue when
 # evaluating WHEN terms.
 #
-do_execsql_test e_expr-21.4.1 {
-  SELECT CASE WHEN NULL THEN 'A' WHEN 1 THEN 'B' END
-} {B}
-do_execsql_test e_expr-21.4.2 {
-  SELECT CASE WHEN 0 THEN 'A' WHEN NULL THEN 'B' ELSE 'C' END
-} {C}
+do_execsql_test e_expr-21.4.1a {
+  SELECT CASE WHEN NULL THEN 'A' WHEN 1 THEN 'B' END, iif(NULL,8,99);
+} {B 99}
+do_execsql_test e_expr-21.4.1b {
+  SELECT CASE WHEN NULL THEN 'A' WHEN 1 THEN 'B' END, if(NULL,8,99);
+} {B 99}
+do_execsql_test e_expr-21.4.2a {
+  SELECT CASE WHEN 0 THEN 'A' WHEN NULL THEN 'B' ELSE 'C' END, iif(0,8,99);
+} {C 99}
+do_execsql_test e_expr-21.4.2b {
+  SELECT CASE WHEN 0 THEN 'A' WHEN NULL THEN 'B' ELSE 'C' END, if(0,8,99);
+} {C 99}
 
 # EVIDENCE-OF: R-38620-19499 In a CASE with a base expression, the base
 # expression is evaluated just once and the result is compared against
@@ -1894,9 +1902,10 @@ do_expr_test e_expr-35.1.6 {
   (SELECT a FROM t2 UNION SELECT COALESCE(b, 55) FROM t2 ORDER BY 1)
 } integer 4
 
-# EVIDENCE-OF: R-22239-33740 A subquery that returns two or more columns
-# is a row value subquery and can only be used as the operand of a
-# comparison operator.
+# EVIDENCE-OF: R-43101-20178 A subquery that returns two or more columns
+# is a row value subquery and can only be used as an operand of a
+# comparison operator or as the value in an UPDATE SET clause whose
+# column name list has the same size.
 #
 # The following block tests that errors are returned in a bunch of cases
 # where a subquery returns more than one column.
@@ -1931,7 +1940,7 @@ foreach {tn expr restype resval} {
     6  { ( SELECT y FROM t4 ORDER BY y DESC ) }        text    two
 
     7  { ( SELECT sum(x) FROM t4 )           }         integer 6
-    8  { ( SELECT group_concat(y,'') FROM t4 ) }       text    onetwothree
+    8  { ( SELECT string_agg(y,'') FROM t4 ) }       text    onetwothree
     9  { ( SELECT max(x) FROM t4 WHERE y LIKE '___') } integer 2 
 
 } {
@@ -1952,39 +1961,42 @@ foreach {tn expr} {
 # 'english' and '0' are all considered to be false.
 #
 do_execsql_test e_expr-37.1 {
-   SELECT CASE WHEN NULL THEN 'true' ELSE 'false' END;
-} {false}
+   SELECT CASE WHEN NULL THEN 'true' ELSE 'false' END, iif(NULL,'true','false');
+} {false false}
 do_execsql_test e_expr-37.2 {
-   SELECT CASE WHEN 0.0 THEN 'true' ELSE 'false' END;
-} {false}
+   SELECT CASE WHEN 0.0 THEN 'true' ELSE 'false' END, iif(0.0,'true','false');
+} {false false}
 do_execsql_test e_expr-37.3 {
-   SELECT CASE WHEN 0 THEN 'true' ELSE 'false' END;
-} {false}
+   SELECT CASE WHEN 0 THEN 'true' ELSE 'false' END, iif(0,'true','false');
+} {false false}
 do_execsql_test e_expr-37.4 {
-   SELECT CASE WHEN 'engligh' THEN 'true' ELSE 'false' END;
-} {false}
+   SELECT CASE WHEN 'engligh' THEN 'true' ELSE 'false' END, iif('engligh','true','false');
+} {false false}
 do_execsql_test e_expr-37.5 {
-   SELECT CASE WHEN '0' THEN 'true' ELSE 'false' END;
-} {false}
+   SELECT CASE WHEN '0' THEN 'true' ELSE 'false' END, iif('0','true','false');
+} {false false}
 
 # EVIDENCE-OF: R-55532-10108 Values 1, 1.0, 0.1, -0.1 and '1english' are
 # considered to be true.
 #
-do_execsql_test e_expr-37.6 {
-   SELECT CASE WHEN 1 THEN 'true' ELSE 'false' END;
-} {true}
+do_execsql_test e_expr-37.6a {
+   SELECT CASE WHEN 1 THEN 'true' ELSE 'false' END, iif(1,'true','false');
+} {true true}
+do_execsql_test e_expr-37.6b {
+   SELECT CASE WHEN 1 THEN 'true' ELSE 'false' END, if(1,'true');
+} {true true}
 do_execsql_test e_expr-37.7 {
-   SELECT CASE WHEN 1.0 THEN 'true' ELSE 'false' END;
-} {true}
+   SELECT CASE WHEN 1.0 THEN 'true' ELSE 'false' END, iif(1.0,'true','false');
+} {true true}
 do_execsql_test e_expr-37.8 {
-   SELECT CASE WHEN 0.1 THEN 'true' ELSE 'false' END;
-} {true}
+   SELECT CASE WHEN 0.1 THEN 'true' ELSE 'false' END, iif(0.1,'true','false');
+} {true true}
 do_execsql_test e_expr-37.9 {
-   SELECT CASE WHEN -0.1 THEN 'true' ELSE 'false' END;
-} {true}
+   SELECT CASE WHEN -0.1 THEN 'true' ELSE 'false' END, iif(-0.1,'true','false');
+} {true true}
 do_execsql_test e_expr-37.10 {
-   SELECT CASE WHEN '1english' THEN 'true' ELSE 'false' END;
-} {true}
+   SELECT CASE WHEN '1english' THEN 'true' ELSE 'false' END, iif('1engl','true','false');
+} {true true}
 
 
 finish_test

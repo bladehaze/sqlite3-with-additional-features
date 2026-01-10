@@ -36,11 +36,7 @@
 */
 #ifdef SQLITE_TEST
 #  include "sqliteInt.h"
-#  if defined(INCLUDE_SQLITE_TCL_H)
-#    include "sqlite_tcl.h"
-#  else
-#    include "tcl.h"
-#  endif
+#  include "tclsqlite.h"
 #else
 #  include "sqlite3ext.h"
   SQLITE_EXTENSION_INIT1
@@ -192,18 +188,18 @@ static int schemaNext(sqlite3_vtab_cursor *cur){
       }
 
       /* Set zSql to the SQL to pull the list of tables from the 
-      ** sqlite_master (or sqlite_temp_master) table of the database
+      ** sqlite_schema (or sqlite_temp_schema) table of the database
       ** identified by the row pointed to by the SQL statement pCur->pDbList
       ** (iterating through a "PRAGMA database_list;" statement).
       */
       if( sqlite3_column_int(pCur->pDbList, 0)==1 ){
         zSql = sqlite3_mprintf(
-            "SELECT name FROM sqlite_temp_master WHERE type='table'"
+            "SELECT name FROM sqlite_temp_schema WHERE type='table'"
         );
       }else{
         sqlite3_stmt *pDbList = pCur->pDbList;
         zSql = sqlite3_mprintf(
-            "SELECT name FROM %Q.sqlite_master WHERE type='table'",
+            "SELECT name FROM %Q.sqlite_schema WHERE type='table'",
              sqlite3_column_text(pDbList, 1)
         );
       }
@@ -292,6 +288,11 @@ static sqlite3_module schemaModule = {
   0,                           /* xRollback */
   0,                           /* xFindMethod */
   0,                           /* xRename */
+  0,                           /* xSavepoint */
+  0,                           /* xRelease */
+  0,                           /* xRollbackTo */
+  0,                           /* xShadowName */
+  0                            /* xIntegrity */
 };
 
 #endif /* !defined(SQLITE_OMIT_VIRTUALTABLE) */

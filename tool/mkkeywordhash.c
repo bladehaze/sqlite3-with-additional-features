@@ -52,7 +52,7 @@ struct Keyword {
 /*
 ** Define masks used to determine which keywords are allowed
 */
-#ifdef SQLITE_OMIT_ALTERTABLE
+#if defined(SQLITE_OMIT_ALTERTABLE) || defined(SQLITE_OMIT_VIRTUALTABLE)
 #  define ALTER      0
 #else
 #  define ALTER      0x00000001
@@ -155,10 +155,21 @@ struct Keyword {
 #  define WINDOWFUNC 0x00100000
 #endif
 #ifdef SQLITE_OMIT_GENERATED_COLUMNS
-#  define GENCOL 0
+#  define GENCOL     0
 #else
-#  define GENCOL 0x00200000
+#  define GENCOL     0x00200000
 #endif
+#ifdef SQLITE_OMIT_RETURNING
+#  define RETURNING  0
+#else
+#  define RETURNING  0x00400000
+#endif
+#ifndef SQLITE_ENABLE_ORDERED_SET_AGGREGATES
+#  define ORDERSET   0
+#else
+#  define ORDERSET   0x00800000
+#endif
+
 
 /*
 ** These are the keywords
@@ -223,7 +234,7 @@ static Keyword aKeywordTable[] = {
   { "FOREIGN",          "TK_FOREIGN",      FKEY,             1      },
   { "FROM",             "TK_FROM",         ALWAYS,           10     },
   { "FULL",             "TK_JOIN_KW",      ALWAYS,           3      },
-  { "GENERATED",        "TK_GENERATED",    GENCOL,           1      },
+  { "GENERATED",        "TK_GENERATED",    ALWAYS,           1      },
   { "GLOB",             "TK_LIKE_KW",      ALWAYS,           3      },
   { "GROUP",            "TK_GROUP",        ALWAYS,           5      },
   { "GROUPS",           "TK_GROUPS",       WINDOWFUNC,       2      },
@@ -249,6 +260,7 @@ static Keyword aKeywordTable[] = {
   { "LIKE",             "TK_LIKE_KW",      ALWAYS,           5      },
   { "LIMIT",            "TK_LIMIT",        ALWAYS,           3      },
   { "MATCH",            "TK_MATCH",        ALWAYS,           2      },
+  { "MATERIALIZED",     "TK_MATERIALIZED", CTE,              12     },
   { "NATURAL",          "TK_JOIN_KW",      ALWAYS,           3      },
   { "NO",               "TK_NO",           FKEY|WINDOWFUNC,  2      },
   { "NOT",              "TK_NOT",          ALWAYS,           10     },
@@ -280,6 +292,7 @@ static Keyword aKeywordTable[] = {
   { "RENAME",           "TK_RENAME",       ALTER,            1      },
   { "REPLACE",          "TK_REPLACE",      CONFLICT,         10     },
   { "RESTRICT",         "TK_RESTRICT",     FKEY,             1      },
+  { "RETURNING",        "TK_RETURNING",    RETURNING,        10     },
   { "RIGHT",            "TK_JOIN_KW",      ALWAYS,           0      },
   { "ROLLBACK",         "TK_ROLLBACK",     ALWAYS,           1      },
   { "ROW",              "TK_ROW",          TRIGGER,          1      },
@@ -308,6 +321,7 @@ static Keyword aKeywordTable[] = {
   { "WHERE",            "TK_WHERE",        ALWAYS,           10     },
   { "WINDOW",           "TK_WINDOW",       WINDOWFUNC,       3      },
   { "WITH",             "TK_WITH",         CTE,              4      },
+  { "WITHIN",           "TK_WITHIN",       ORDERSET,         1      },
   { "WITHOUT",          "TK_WITHOUT",      ALWAYS,           1      },
 };
 
@@ -381,6 +395,14 @@ static void reorder(int *pFrom){
   reorder(&aKeywordTable[i].iNext);
 }
 
+/* Parameter to the hash function
+*/
+#define HASH_OP ^
+#define HASH_CC '^'
+#define HASH_C0 4
+#define HASH_C1 3
+#define HASH_C2 1
+
 /*
 ** This routine does the work.  The generated code is printed on standard
 ** output.
@@ -411,8 +433,9 @@ int main(int argc, char **argv){
     assert( p->len<sizeof(p->zOrigName) );
     memcpy(p->zOrigName, p->zName, p->len+1);
     totalLen += p->len;
-    p->hash = (charMap(p->zName[0])*4) ^
-              (charMap(p->zName[p->len-1])*3) ^ (p->len*1);
+    p->hash = (charMap(p->zName[0])*HASH_C0) HASH_OP
+              (charMap(p->zName[p->len-1])*HASH_C1) HASH_OP
+              (p->len*HASH_C2);
     p->id = i+1;
   }
 
@@ -496,6 +519,7 @@ int main(int argc, char **argv){
   bestSize = nKeyword;
   bestCount = nKeyword*nKeyword;
   for(i=nKeyword/2; i<=2*nKeyword; i++){
+    if( i<=0 ) continue;
     for(j=0; j<i; j++) aKWHash[j] = 0;
     for(j=0; j<nKeyword; j++){
       h = aKeywordTable[j].hash % i;
@@ -578,7 +602,7 @@ int main(int argc, char **argv){
   printf("/* aKWNext[] forms the hash collision chain.  If aKWHash[i]==0\n");
   printf("** then the i-th keyword has no more hash collisions.  Otherwise,\n");
   printf("** the next keyword with the same hash is aKWHash[i]-1. */\n");
-  printf("static const unsigned char aKWNext[%d] = {\n", nKeyword);
+  printf("static const unsigned char aKWNext[%d] = {0,\n", nKeyword+1);
   for(i=j=0; i<nKeyword; i++){
     if( j==0 ) printf("  ");
     printf(" %3d,", aKeywordTable[i].iNext);
@@ -591,7 +615,7 @@ int main(int argc, char **argv){
   printf("%s};\n", j==0 ? "" : "\n");    
 
   printf("/* aKWLen[i] is the length (in bytes) of the i-th keyword */\n");
-  printf("static const unsigned char aKWLen[%d] = {\n", nKeyword);
+  printf("static const unsigned char aKWLen[%d] = {0,\n", nKeyword+1);
   for(i=j=0; i<nKeyword; i++){
     if( j==0 ) printf("  ");
     printf(" %3d,", aKeywordTable[i].len+aKeywordTable[i].prefix);
@@ -605,7 +629,7 @@ int main(int argc, char **argv){
 
   printf("/* aKWOffset[i] is the index into zKWText[] of the start of\n");
   printf("** the text for the i-th keyword. */\n");
-  printf("static const unsigned short int aKWOffset[%d] = {\n", nKeyword);
+  printf("static const unsigned short int aKWOffset[%d] = {0,\n", nKeyword+1);
   for(i=j=0; i<nKeyword; i++){
     if( j==0 ) printf("  ");
     printf(" %3d,", aKeywordTable[i].offset);
@@ -618,7 +642,7 @@ int main(int argc, char **argv){
   printf("%s};\n", j==0 ? "" : "\n");
 
   printf("/* aKWCode[i] is the parser symbol code for the i-th keyword */\n");
-  printf("static const unsigned char aKWCode[%d] = {\n", nKeyword);
+  printf("static const unsigned char aKWCode[%d] = {0,\n", nKeyword+1);
   for(i=j=0; i<nKeyword; i++){
     char *zToken = aKeywordTable[i].zTokenType;
     if( j==0 ) printf("  ");
@@ -644,46 +668,47 @@ int main(int argc, char **argv){
   printf("/* Check to see if z[0..n-1] is a keyword. If it is, write the\n");
   printf("** parser symbol code for that keyword into *pType.  Always\n");
   printf("** return the integer n (the length of the token). */\n");
-  printf("static int keywordCode(const char *z, int n, int *pType){\n");
-  printf("  int i, j;\n");
+  printf("static i64 keywordCode(const char *z, i64 n, int *pType){\n");
+  printf("  i64 i, j;\n");
   printf("  const char *zKW;\n");
-  printf("  if( n>=2 ){\n");
-  printf("    i = ((charMap(z[0])*4) ^ (charMap(z[n-1])*3) ^ n) %% %d;\n",
-          bestSize);
-  printf("    for(i=((int)aKWHash[i])-1; i>=0; i=((int)aKWNext[i])-1){\n");
-  printf("      if( aKWLen[i]!=n ) continue;\n");
-  printf("      zKW = &zKWText[aKWOffset[i]];\n");
+  printf("  assert( n>=2 );\n");
+  printf("  i = ((charMap(z[0])*%d) %c", HASH_C0, HASH_CC);
+  printf(" (charMap(z[n-1])*%d) %c", HASH_C1, HASH_CC);
+  printf(" n*%d) %% %d;\n", HASH_C2, bestSize);
+  printf("  for(i=(int)aKWHash[i]; i>0; i=aKWNext[i]){\n");
+  printf("    if( aKWLen[i]!=n ) continue;\n");
+  printf("    zKW = &zKWText[aKWOffset[i]];\n");
   printf("#ifdef SQLITE_ASCII\n");
-  printf("      if( (z[0]&~0x20)!=zKW[0] ) continue;\n");
-  printf("      if( (z[1]&~0x20)!=zKW[1] ) continue;\n");
-  printf("      j = 2;\n");
-  printf("      while( j<n && (z[j]&~0x20)==zKW[j] ){ j++; }\n");
+  printf("    if( (z[0]&~0x20)!=zKW[0] ) continue;\n");
+  printf("    if( (z[1]&~0x20)!=zKW[1] ) continue;\n");
+  printf("    j = 2;\n");
+  printf("    while( j<n && (z[j]&~0x20)==zKW[j] ){ j++; }\n");
   printf("#endif\n");
   printf("#ifdef SQLITE_EBCDIC\n");
-  printf("      if( toupper(z[0])!=zKW[0] ) continue;\n");
-  printf("      if( toupper(z[1])!=zKW[1] ) continue;\n");
-  printf("      j = 2;\n");
-  printf("      while( j<n && toupper(z[j])==zKW[j] ){ j++; }\n");
+  printf("    if( toupper(z[0])!=zKW[0] ) continue;\n");
+  printf("    if( toupper(z[1])!=zKW[1] ) continue;\n");
+  printf("    j = 2;\n");
+  printf("    while( j<n && toupper(z[j])==zKW[j] ){ j++; }\n");
   printf("#endif\n");
-  printf("      if( j<n ) continue;\n");
+  printf("    if( j<n ) continue;\n");
   for(i=0; i<nKeyword; i++){
-    printf("      testcase( i==%d ); /* %s */\n",
-           i, aKeywordTable[i].zOrigName);
+    printf("    testcase( i==%d ); /* %s */\n",
+           i+1, aKeywordTable[i].zOrigName);
   }
-  printf("      *pType = aKWCode[i];\n");
-  printf("      break;\n");
-  printf("    }\n");
+  printf("    *pType = aKWCode[i];\n");
+  printf("    break;\n");
   printf("  }\n");
   printf("  return n;\n");
   printf("}\n");
   printf("int sqlite3KeywordCode(const unsigned char *z, int n){\n");
   printf("  int id = TK_ID;\n");
-  printf("  keywordCode((char*)z, n, &id);\n");
+  printf("  if( n>=2 ) keywordCode((char*)z, n, &id);\n");
   printf("  return id;\n");
   printf("}\n");
   printf("#define SQLITE_N_KEYWORD %d\n", nKeyword);
   printf("int sqlite3_keyword_name(int i,const char **pzName,int *pnName){\n");
   printf("  if( i<0 || i>=SQLITE_N_KEYWORD ) return SQLITE_ERROR;\n");
+  printf("  i++;\n");
   printf("  *pzName = zKWText + aKWOffset[i];\n");
   printf("  *pnName = aKWLen[i];\n");
   printf("  return SQLITE_OK;\n");

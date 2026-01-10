@@ -211,7 +211,7 @@ static int fts5tokConnectMethod(
 
     rc = pApi->xFindTokenizer(pApi, zModule, &pTokCtx, &pTab->tok);
     if( rc==SQLITE_OK ){
-      const char **azArg = (const char **)&azDequote[1];
+      const char **azArg = (nDequote>1 ? (const char **)&azDequote[1] : 0);
       int nArg = nDequote>0 ? nDequote-1 : 0;
       rc = pTab->tok.xCreate(pTokCtx, azArg, nArg, &pTab->pTok);
     }
@@ -472,7 +472,8 @@ int sqlite3Fts5TestRegisterTok(sqlite3 *db, fts5_api *pApi){
      0,                           /* xSavepoint    */
      0,                           /* xRelease      */
      0,                           /* xRollbackTo   */
-     0                            /* xShadowName   */
+     0,                           /* xShadowName   */
+     0                            /* xIntegrity    */
   };
   int rc;                         /* Return code */
 

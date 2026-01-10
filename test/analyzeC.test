@@ -50,7 +50,7 @@ do_execsql_test 1.2 {
 do_execsql_test 1.3 {
   EXPLAIN QUERY PLAN
   SELECT c FROM t1 ORDER BY a;
-} {/.*SCAN TABLE t1 USING INDEX t1a.*/}
+} {/.*SCAN t1 USING INDEX t1a.*/}
 do_execsql_test 1.3x {
   EXPLAIN QUERY PLAN
   SELECT c FROM t1 ORDER BY a;
@@ -133,7 +133,7 @@ do_execsql_test 4.3 {
 } {/.*INDEX t1ca.*/}
 
 # 2019-08-15.
-# Ticket https://www.sqlite.org/src/tktview/e4598ecbdd18bd82945f602901
+# Ticket https://sqlite.org/src/tktview/e4598ecbdd18bd82945f602901
 # The sz=N parameter in the sqlite_stat1 table needs to have a value of
 # 2 or more to avoid a division by zero in the query planner.
 #

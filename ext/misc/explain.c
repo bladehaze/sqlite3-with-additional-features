@@ -16,7 +16,7 @@
 ** Usage example:
 **
 **     .load ./explain
-**     SELECT p2 FROM explain('SELECT * FROM sqlite_master')
+**     SELECT p2 FROM explain('SELECT * FROM sqlite_schema')
 **      WHERE opcode='OpenRead';
 **
 ** This module was originally written to help simplify SQLite testing,
@@ -293,6 +293,7 @@ static sqlite3_module explainModule = {
   0,                         /* xRelease */
   0,                         /* xRollbackTo */
   0,                         /* xShadowName */
+  0                          /* xIntegrity */
 };
 
 #endif /* SQLITE_OMIT_VIRTUALTABLE */

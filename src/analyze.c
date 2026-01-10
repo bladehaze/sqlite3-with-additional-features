@@ -186,8 +186,13 @@ static void openStatTable(
   sqlite3 *db = pParse->db;
   Db *pDb;
   Vdbe *v = sqlite3GetVdbe(pParse);
-  int aRoot[ArraySize(aTable)];
+  u32 aRoot[ArraySize(aTable)];
   u8 aCreateTbl[ArraySize(aTable)];
+#ifdef SQLITE_ENABLE_STAT4
+  const int nToOpen = OptimizationEnabled(db,SQLITE_Stat4) ? 2 : 1;
+#else
+  const int nToOpen = 1;
+#endif
 
   if( v==0 ) return;
   assert( sqlite3BtreeHoldsAllMutexes(db) );
@@ -200,8 +205,9 @@ static void openStatTable(
   for(i=0; i<ArraySize(aTable); i++){
     const char *zTab = aTable[i].zName;
     Table *pStat;
+    aCreateTbl[i] = 0;
     if( (pStat = sqlite3FindTable(db, zTab, pDb->zDbSName))==0 ){
-      if( aTable[i].zCols ){
+      if( i<nToOpen ){
         /* The sqlite_statN table does not exist. Create it. Note that a 
         ** side-effect of the CREATE TABLE statement is to leave the rootpage 
         ** of the new table in register pParse->regRoot. This is important 
@@ -209,7 +215,8 @@ static void openStatTable(
         sqlite3NestedParse(pParse,
             "CREATE TABLE %Q.%s(%s)", pDb->zDbSName, zTab, aTable[i].zCols
         );
-        aRoot[i] = pParse->regRoot;
+        assert( pParse->isCreate || pParse->nErr );
+        aRoot[i] = (u32)pParse->u1.cr.regRoot;
         aCreateTbl[i] = OPFLAG_P2ISREG;
       }
     }else{
@@ -217,7 +224,6 @@ static void openStatTable(
       ** associated with the table zWhere. If zWhere is NULL, delete the
       ** entire contents of the table. */
       aRoot[i] = pStat->tnum;
-      aCreateTbl[i] = 0;
       sqlite3TableLock(pParse, iDb, aRoot[i], 1, zTab);
       if( zWhere ){
         sqlite3NestedParse(pParse,
@@ -230,15 +236,15 @@ static void openStatTable(
 #endif
       }else{
         /* The sqlite_stat[134] table already exists.  Delete all rows. */
-        sqlite3VdbeAddOp2(v, OP_Clear, aRoot[i], iDb);
+        sqlite3VdbeAddOp2(v, OP_Clear, (int)aRoot[i], iDb);
       }
     }
   }
 
   /* Open the sqlite_stat[134] tables for writing. */
-  for(i=0; aTable[i].zCols; i++){
+  for(i=0; i<nToOpen; i++){
     assert( i<ArraySize(aTable) );
-    sqlite3VdbeAddOp4Int(v, OP_OpenWrite, iStatCur+i, aRoot[i], iDb, 3);
+    sqlite3VdbeAddOp4Int(v, OP_OpenWrite, iStatCur+i, (int)aRoot[i], iDb, 3);
     sqlite3VdbeChangeP5(v, aCreateTbl[i]);
     VdbeComment((v, aTable[i].zName));
   }
@@ -259,9 +265,9 @@ static void openStatTable(
 typedef struct StatAccum StatAccum;
 typedef struct StatSample StatSample;
 struct StatSample {
-  tRowcnt *anEq;                  /* sqlite_stat4.nEq */
   tRowcnt *anDLt;                 /* sqlite_stat4.nDLt */
 #ifdef SQLITE_ENABLE_STAT4
+  tRowcnt *anEq;                  /* sqlite_stat4.nEq */
   tRowcnt *anLt;                  /* sqlite_stat4.nLt */
   union {
     i64 iRowid;                     /* Rowid in main table of the key */
@@ -275,9 +281,12 @@ struct StatSample {
 };                                                    
 struct StatAccum {
   sqlite3 *db;              /* Database connection, for malloc() */
-  tRowcnt nRow;             /* Number of rows in the entire table */
+  tRowcnt nEst;             /* Estimated number of rows */
+  tRowcnt nRow;             /* Number of rows visited so far */
+  int nLimit;               /* Analysis row-scan limit */
   int nCol;                 /* Number of columns in index + pk/rowid */
   int nKeyCol;              /* Number of index columns w/o the pk/rowid */
+  u8 nSkipAhead;            /* Number of times of skip-ahead */
   StatSample current;       /* Current row as a StatSample */
 #ifdef SQLITE_ENABLE_STAT4
   tRowcnt nPSample;         /* How often to do a periodic sample */
@@ -357,26 +366,27 @@ static void sampleCopy(StatAccum *p, StatSample *pTo, StatSample *pFrom){
 static void statAccumDestructor(void *pOld){
   StatAccum *p = (StatAccum*)pOld;
 #ifdef SQLITE_ENABLE_STAT4
-  int i;
-  for(i=0; i<p->nCol; i++) sampleClear(p->db, p->aBest+i);
-  for(i=0; i<p->mxSample; i++) sampleClear(p->db, p->a+i);
-  sampleClear(p->db, &p->current);
+  if( p->mxSample ){
+    int i;
+    for(i=0; i<p->nCol; i++) sampleClear(p->db, p->aBest+i);
+    for(i=0; i<p->mxSample; i++) sampleClear(p->db, p->a+i);
+    sampleClear(p->db, &p->current);
+  }
 #endif
   sqlite3DbFree(p->db, p);
 }
 
 /*
-** Implementation of the stat_init(N,K,C) SQL function. The three parameters
+** Implementation of the stat_init(N,K,C,L) SQL function. The four parameters
 ** are:
 **     N:    The number of columns in the index including the rowid/pk (note 1)
 **     K:    The number of columns in the index excluding the rowid/pk.
-**     C:    The number of rows in the index (note 2)
+**     C:    Estimated number of rows in the index
+**     L:    A limit on the number of rows to scan, or 0 for no-limit 
 **
 ** Note 1:  In the special case of the covering index that implements a
 ** WITHOUT ROWID table, N is the number of PRIMARY KEY columns, not the
 ** total number of columns in the table.
-**
-** Note 2:  C is only used for STAT4.
 **
 ** For indexes on ordinary rowid tables, N==K+1.  But for indexes on
 ** WITHOUT ROWID tables, N=K+P where P is the number of columns in the
@@ -397,10 +407,11 @@ static void statInit(
   int nCol;                       /* Number of columns in index being sampled */
   int nKeyCol;                    /* Number of key columns */
   int nColUp;                     /* nCol rounded up for alignment */
-  int n;                          /* Bytes of space to allocate */
-  sqlite3 *db;                    /* Database connection */
+  i64 n;                          /* Bytes of space to allocate */
+  sqlite3 *db = sqlite3_context_db_handle(context);   /* Database connection */
 #ifdef SQLITE_ENABLE_STAT4
-  int mxSample = SQLITE_STAT4_SAMPLES;
+  /* Maximum number of samples.  0 if STAT4 data is not collected */
+  int mxSample = OptimizationEnabled(db,SQLITE_Stat4) ?SQLITE_STAT4_SAMPLES :0;
 #endif
 
   /* Decode the three function arguments */
@@ -414,15 +425,15 @@ static void statInit(
 
   /* Allocate the space required for the StatAccum object */
   n = sizeof(*p) 
-    + sizeof(tRowcnt)*nColUp                  /* StatAccum.anEq */
-    + sizeof(tRowcnt)*nColUp                  /* StatAccum.anDLt */
+    + sizeof(tRowcnt)*nColUp;                    /* StatAccum.anDLt */
 #ifdef SQLITE_ENABLE_STAT4
-    + sizeof(tRowcnt)*nColUp                  /* StatAccum.anLt */
-    + sizeof(StatSample)*(nCol+mxSample)      /* StatAccum.aBest[], a[] */
-    + sizeof(tRowcnt)*3*nColUp*(nCol+mxSample)
+  n += sizeof(tRowcnt)*nColUp;                   /* StatAccum.anEq */
+  if( mxSample ){
+    n += sizeof(tRowcnt)*nColUp                  /* StatAccum.anLt */
+      + sizeof(StatSample)*(nCol+mxSample)       /* StatAccum.aBest[], a[] */
+      + sizeof(tRowcnt)*3*nColUp*(nCol+mxSample);
+  }
 #endif
-  ;
-  db = sqlite3_context_db_handle(context);
   p = sqlite3DbMallocZero(db, n);
   if( p==0 ){
     sqlite3_result_error_nomem(context);
@@ -430,20 +441,23 @@ static void statInit(
   }
 
   p->db = db;
+  p->nEst = sqlite3_value_int64(argv[2]);
   p->nRow = 0;
+  p->nLimit = sqlite3_value_int(argv[3]);
   p->nCol = nCol;
   p->nKeyCol = nKeyCol;
+  p->nSkipAhead = 0;
   p->current.anDLt = (tRowcnt*)&p[1];
-  p->current.anEq = &p->current.anDLt[nColUp];
 
 #ifdef SQLITE_ENABLE_STAT4
-  {
+  p->current.anEq = &p->current.anDLt[nColUp];
+  p->mxSample = p->nLimit==0 ? mxSample : 0;
+  if( mxSample ){
     u8 *pSpace;                     /* Allocated space not yet assigned */
     int i;                          /* Used to iterate through p->aSample[] */
 
     p->iGet = -1;
-    p->mxSample = mxSample;
-    p->nPSample = (tRowcnt)(sqlite3_value_int64(argv[2])/(mxSample/3+1) + 1);
+    p->nPSample = (tRowcnt)(p->nEst/(mxSample/3+1) + 1);
     p->current.anLt = &p->current.anEq[nColUp];
     p->iPrn = 0x689e962d*(u32)nCol ^ 0xd0944565*(u32)sqlite3_value_int(argv[2]);
   
@@ -471,7 +485,7 @@ static void statInit(
   sqlite3_result_blob(context, p, sizeof(*p), statAccumDestructor);
 }
 static const FuncDef statInitFuncdef = {
-  2+IsStat4,       /* nArg */
+  4,               /* nArg */
   SQLITE_UTF8,     /* funcFlags */
   0,               /* pUserData */
   0,               /* pNext */
@@ -675,10 +689,13 @@ static void samplePushPrevious(StatAccum *p, int iChng){
 **    R     Rowid for the current row.  Might be a key record for
 **          WITHOUT ROWID tables.
 **
-** This SQL function always returns NULL.  It's purpose it to accumulate
-** statistical data and/or samples in the StatAccum object about the
-** index being analyzed.  The stat_get() SQL function will later be used to
-** extract relevant information for constructing the sqlite_statN tables.
+** The purpose of this routine is to collect statistical data and/or
+** samples from the index being analyzed into the StatAccum object.
+** The stat_get() SQL function will be used afterwards to
+** retrieve the information gathered.
+**
+** This SQL function usually returns NULL, but might return an integer
+** if it wants the byte-code to do special processing.
 **
 ** The R parameter is only used for STAT4
 */
@@ -700,41 +717,44 @@ static void statPush(
 
   if( p->nRow==0 ){
     /* This is the first call to this function. Do initialization. */
+#ifdef SQLITE_ENABLE_STAT4
     for(i=0; i<p->nCol; i++) p->current.anEq[i] = 1;
+#endif
   }else{
     /* Second and subsequent calls get processed here */
 #ifdef SQLITE_ENABLE_STAT4
-    samplePushPrevious(p, iChng);
+    if( p->mxSample ) samplePushPrevious(p, iChng);
 #endif
 
     /* Update anDLt[], anLt[] and anEq[] to reflect the values that apply
     ** to the current row of the index. */
+#ifdef SQLITE_ENABLE_STAT4
     for(i=0; i<iChng; i++){
       p->current.anEq[i]++;
     }
+#endif
     for(i=iChng; i<p->nCol; i++){
       p->current.anDLt[i]++;
 #ifdef SQLITE_ENABLE_STAT4
-      p->current.anLt[i] += p->current.anEq[i];
-#endif
+      if( p->mxSample ) p->current.anLt[i] += p->current.anEq[i];
       p->current.anEq[i] = 1;
+#endif
     }
   }
+
   p->nRow++;
 #ifdef SQLITE_ENABLE_STAT4
-  if( sqlite3_value_type(argv[2])==SQLITE_INTEGER ){
-    sampleSetRowidInt64(p->db, &p->current, sqlite3_value_int64(argv[2]));
-  }else{
-    sampleSetRowid(p->db, &p->current, sqlite3_value_bytes(argv[2]),
-                                       sqlite3_value_blob(argv[2]));
-  }
-  p->current.iHash = p->iPrn = p->iPrn*1103515245 + 12345;
-#endif
+  if( p->mxSample ){
+    tRowcnt nLt;
+    if( sqlite3_value_type(argv[2])==SQLITE_INTEGER ){
+      sampleSetRowidInt64(p->db, &p->current, sqlite3_value_int64(argv[2]));
+    }else{
+      sampleSetRowid(p->db, &p->current, sqlite3_value_bytes(argv[2]),
+                                         sqlite3_value_blob(argv[2]));
+    }
+    p->current.iHash = p->iPrn = p->iPrn*1103515245 + 12345;
 
-#ifdef SQLITE_ENABLE_STAT4
-  {
-    tRowcnt nLt = p->current.anLt[p->nCol-1];
-
+    nLt = p->current.anLt[p->nCol-1];
     /* Check if this is to be a periodic sample. If so, add it. */
     if( (nLt/p->nPSample)!=(nLt+1)/p->nPSample ){
       p->current.isPSample = 1;
@@ -750,9 +770,14 @@ static void statPush(
         sampleCopy(p, &p->aBest[i], &p->current);
       }
     }
-  }
+  }else
 #endif
+  if( p->nLimit && p->nRow>(tRowcnt)p->nLimit*(p->nSkipAhead+1) ){
+    p->nSkipAhead++;
+    sqlite3_result_int(context, p->current.anDLt[0]>0);
+  }
 }
+
 static const FuncDef statPushFuncdef = {
   2+IsStat4,       /* nArg */
   SQLITE_UTF8,     /* funcFlags */
@@ -804,6 +829,7 @@ static void statGet(
        || eCall==STAT_GET_ROWID || eCall==STAT_GET_NLT
        || eCall==STAT_GET_NDLT 
   );
+  assert( eCall==STAT_GET_STAT1 || p->mxSample );
   if( eCall==STAT_GET_STAT1 )
 #else
   assert( argc==1 );
@@ -826,31 +852,31 @@ static void statGet(
     **   * "WHERE a=? AND b=?" matches 2 rows.
     **
     ** If D is the count of distinct values and K is the total number of 
-    ** rows, then each estimate is computed as:
+    ** rows, then each estimate is usually computed as:
     **
     **        I = (K+D-1)/D
+    **
+    ** In other words, I is K/D rounded up to the next whole integer.
+    ** However, if I is between 1.0 and 1.1 (in other words if I is
+    ** close to 1.0 but just a little larger) then do not round up but
+    ** instead keep the I value at 1.0.
     */
-    char *z;
-    int i;
+    sqlite3_str sStat;   /* Text of the constructed "stat" line */
+    int i;               /* Loop counter */
 
-    char *zRet = sqlite3MallocZero( (p->nKeyCol+1)*25 );
-    if( zRet==0 ){
-      sqlite3_result_error_nomem(context);
-      return;
-    }
-
-    sqlite3_snprintf(24, zRet, "%llu", (u64)p->nRow);
-    z = zRet + sqlite3Strlen30(zRet);
+    sqlite3StrAccumInit(&sStat, 0, 0, 0, (p->nKeyCol+1)*100);
+    sqlite3_str_appendf(&sStat, "%llu", 
+        p->nSkipAhead ? (u64)p->nEst : (u64)p->nRow);
     for(i=0; i<p->nKeyCol; i++){
       u64 nDistinct = p->current.anDLt[i] + 1;
       u64 iVal = (p->nRow + nDistinct - 1) / nDistinct;
-      sqlite3_snprintf(24, z, " %llu", iVal);
-      z += sqlite3Strlen30(z);
-      assert( p->current.anEq[i] );
+      if( iVal==2 && p->nRow*10 <= nDistinct*11 ) iVal = 1;
+      sqlite3_str_appendf(&sStat, " %llu", iVal);
+#ifdef SQLITE_ENABLE_STAT4
+      assert( p->current.anEq[i] || p->nRow==0 );
+#endif
     }
-    assert( z[0]=='\0' && z>zRet );
-
-    sqlite3_result_text(context, zRet, -1, sqlite3_free);
+    sqlite3ResultStrAccum(context, &sStat);
   }
 #ifdef SQLITE_ENABLE_STAT4
   else if( eCall==STAT_GET_ROWID ){
@@ -869,6 +895,8 @@ static void statGet(
     }
   }else{
     tRowcnt *aCnt = 0;
+    sqlite3_str sStat;
+    int i;
 
     assert( p->iGet<p->nSample );
     switch( eCall ){
@@ -880,23 +908,12 @@ static void statGet(
         break;
       }
     }
-
-    {
-      char *zRet = sqlite3MallocZero(p->nCol * 25);
-      if( zRet==0 ){
-        sqlite3_result_error_nomem(context);
-      }else{
-        int i;
-        char *z = zRet;
-        for(i=0; i<p->nCol; i++){
-          sqlite3_snprintf(24, z, "%llu ", (u64)aCnt[i]);
-          z += sqlite3Strlen30(z);
-        }
-        assert( z[0]=='\0' && z>zRet );
-        z[-1] = '\0';
-        sqlite3_result_text(context, zRet, -1, sqlite3_free);
-      }
+    sqlite3StrAccumInit(&sStat, 0, 0, 0, p->nCol*100);
+    for(i=0; i<p->nCol; i++){
+      sqlite3_str_appendf(&sStat, "%llu ", (u64)aCnt[i]);
     }
+    if( sStat.nChar ) sStat.nChar--;
+    sqlite3ResultStrAccum(context, &sStat);
   }
 #endif /* SQLITE_ENABLE_STAT4 */
 #ifndef SQLITE_DEBUG
@@ -915,18 +932,43 @@ static const FuncDef statGetFuncdef = {
   {0}
 };
 
-static void callStatGet(Parse *pParse, int regStat4, int iParam, int regOut){
+static void callStatGet(Parse *pParse, int regStat, int iParam, int regOut){
 #ifdef SQLITE_ENABLE_STAT4
-  sqlite3VdbeAddOp2(pParse->pVdbe, OP_Integer, iParam, regStat4+1);
+  sqlite3VdbeAddOp2(pParse->pVdbe, OP_Integer, iParam, regStat+1);
 #elif SQLITE_DEBUG
   assert( iParam==STAT_GET_STAT1 );
 #else
   UNUSED_PARAMETER( iParam );
 #endif
-  assert( regOut!=regStat4 && regOut!=regStat4+1 );
-  sqlite3VdbeAddFunctionCall(pParse, 0, regStat4, regOut, 1+IsStat4,
+  assert( regOut!=regStat && regOut!=regStat+1 );
+  sqlite3VdbeAddFunctionCall(pParse, 0, regStat, regOut, 1+IsStat4,
                              &statGetFuncdef, 0);
 }
+
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+/* Add a comment to the most recent VDBE opcode that is the name
+** of the k-th column of the pIdx index.
+*/
+static void analyzeVdbeCommentIndexWithColumnName(
+  Vdbe *v,         /* Prepared statement under construction */
+  Index *pIdx,     /* Index whose column is being loaded */
+  int k            /* Which column index */
+){
+  int i;           /* Index of column in the table */
+  assert( k>=0 && k<pIdx->nColumn );
+  i = pIdx->aiColumn[k];
+  if( NEVER(i==XN_ROWID) ){
+    VdbeComment((v,"%s.rowid",pIdx->zName));
+  }else if( i==XN_EXPR ){
+    assert( pIdx->bHasExpr );
+    VdbeComment((v,"%s.expr(%d)",pIdx->zName, k));
+  }else{
+    VdbeComment((v,"%s.%s", pIdx->zName, pIdx->pTable->aCol[i].zCnName));
+  }
+}
+#else
+# define analyzeVdbeCommentIndexWithColumnName(a,b,c)
+#endif /* SQLITE_DEBUG */
 
 /*
 ** Generate code to do an analysis of all indices associated with
@@ -950,26 +992,29 @@ static void analyzeOneTable(
   int iDb;                     /* Index of database containing pTab */
   u8 needTableCnt = 1;         /* True to count the table */
   int regNewRowid = iMem++;    /* Rowid for the inserted record */
-  int regStat4 = iMem++;       /* Register to hold StatAccum object */
+  int regStat = iMem++;        /* Register to hold StatAccum object */
   int regChng = iMem++;        /* Index of changed index field */
-#ifdef SQLITE_ENABLE_STAT4
   int regRowid = iMem++;       /* Rowid argument passed to stat_push() */
-#endif
   int regTemp = iMem++;        /* Temporary use register */
+  int regTemp2 = iMem++;       /* Second temporary use register */
   int regTabname = iMem++;     /* Register containing table name */
   int regIdxname = iMem++;     /* Register containing index name */
   int regStat1 = iMem++;       /* Value for the stat column of sqlite_stat1 */
   int regPrev = iMem;          /* MUST BE LAST (see below) */
+#ifdef SQLITE_ENABLE_STAT4
+  int doOnce = 1;              /* Flag for a one-time computation */
+#endif
 #ifdef SQLITE_ENABLE_PREUPDATE_HOOK
-  Table *pStat1 = 0; 
+  Table *pStat1 = 0;
 #endif
 
-  pParse->nMem = MAX(pParse->nMem, iMem);
+  sqlite3TouchRegister(pParse, iMem);
+  assert( sqlite3NoTempsInRange(pParse, regNewRowid, iMem) );
   v = sqlite3GetVdbe(pParse);
   if( v==0 || NEVER(pTab==0) ){
     return;
   }
-  if( pTab->tnum==0 ){
+  if( !IsOrdinaryTable(pTab) ){
     /* Do not gather statistics on views or virtual tables */
     return;
   }
@@ -996,7 +1041,7 @@ static void analyzeOneTable(
     memcpy(pStat1->zName, "sqlite_stat1", 13);
     pStat1->nCol = 3;
     pStat1->iPKey = -1;
-    sqlite3VdbeAddOp4(pParse->pVdbe, OP_Noop, 0, 0, 0,(char*)pStat1,P4_DYNBLOB);
+    sqlite3VdbeAddOp4(pParse->pVdbe, OP_Noop, 0, 0, 0,(char*)pStat1,P4_DYNAMIC);
   }
 #endif
 
@@ -1013,7 +1058,7 @@ static void analyzeOneTable(
 
   for(pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext){
     int nCol;                     /* Number of columns in pIdx. "N" */
-    int addrRewind;               /* Address of "OP_Rewind iIdxCur" */
+    int addrGotoEnd;               /* Address of "OP_Rewind iIdxCur" */
     int addrNextRow;              /* Address of "next_row:" */
     const char *zIdxName;         /* Name of the index */
     int nColTest;                 /* Number of columns to test for changes */
@@ -1037,9 +1082,14 @@ static void analyzeOneTable(
     /*
     ** Pseudo-code for loop that calls stat_push():
     **
-    **   Rewind csr
-    **   if eof(csr) goto end_of_scan;
     **   regChng = 0
+    **   Rewind csr
+    **   if eof(csr){
+    **      stat_init() with count = 0;
+    **      goto end_of_scan;
+    **   }
+    **   count()
+    **   stat_init()
     **   goto chng_addr_0;
     **
     **  next_row:
@@ -1070,7 +1120,7 @@ static void analyzeOneTable(
     ** the regPrev array and a trailing rowid (the rowid slot is required
     ** when building a record to insert into the sample column of 
     ** the sqlite_stat4 table.  */
-    pParse->nMem = MAX(pParse->nMem, regPrev+nColTest);
+    sqlite3TouchRegister(pParse, regPrev+nColTest);
 
     /* Open a read-only cursor on the index being analyzed. */
     assert( iDb==sqlite3SchemaToIndex(db, pIdx->pSchema) );
@@ -1078,34 +1128,36 @@ static void analyzeOneTable(
     sqlite3VdbeSetP4KeyInfo(pParse, pIdx);
     VdbeComment((v, "%s", pIdx->zName));
 
-    /* Invoke the stat_init() function. The arguments are:
-    ** 
+    /* Implementation of the following:
+    **
+    **   regChng = 0
+    **   Rewind csr
+    **   if eof(csr){
+    **      stat_init() with count = 0;
+    **      goto end_of_scan;
+    **   }
+    **   count()
+    **   stat_init()
+    **   goto chng_addr_0;
+    */
+    assert( regTemp2==regStat+4 );
+    sqlite3VdbeAddOp2(v, OP_Integer, db->nAnalysisLimit, regTemp2);
+
+    /* Arguments to stat_init(): 
     **    (1) the number of columns in the index including the rowid
     **        (or for a WITHOUT ROWID table, the number of PK columns),
     **    (2) the number of columns in the key without the rowid/pk
-    **    (3) the number of rows in the index,
-    **
-    **
-    ** The third argument is only used for STAT4
-    */
-#ifdef SQLITE_ENABLE_STAT4
-    sqlite3VdbeAddOp2(v, OP_Count, iIdxCur, regStat4+3);
-#endif
-    sqlite3VdbeAddOp2(v, OP_Integer, nCol, regStat4+1);
-    sqlite3VdbeAddOp2(v, OP_Integer, pIdx->nKeyCol, regStat4+2);
-    sqlite3VdbeAddFunctionCall(pParse, 0, regStat4+1, regStat4, 2+IsStat4,
+    **    (3) estimated number of rows in the index. */
+    sqlite3VdbeAddOp2(v, OP_Integer, nCol, regStat+1);
+    assert( regRowid==regStat+2 );
+    sqlite3VdbeAddOp2(v, OP_Integer, pIdx->nKeyCol, regRowid);
+    sqlite3VdbeAddOp3(v, OP_Count, iIdxCur, regTemp,
+                      OptimizationDisabled(db, SQLITE_Stat4));
+    sqlite3VdbeAddFunctionCall(pParse, 0, regStat+1, regStat, 4,
                                &statInitFuncdef, 0);
-
-    /* Implementation of the following:
-    **
-    **   Rewind csr
-    **   if eof(csr) goto end_of_scan;
-    **   regChng = 0
-    **   goto next_push_0;
-    **
-    */
-    addrRewind = sqlite3VdbeAddOp1(v, OP_Rewind, iIdxCur);
+    addrGotoEnd = sqlite3VdbeAddOp1(v, OP_Rewind, iIdxCur);
     VdbeCoverage(v);
+
     sqlite3VdbeAddOp2(v, OP_Integer, 0, regChng);
     addrNextRow = sqlite3VdbeCurrentAddr(v);
 
@@ -1138,6 +1190,7 @@ static void analyzeOneTable(
         char *pColl = (char*)sqlite3LocateCollSeq(pParse, pIdx->azColl[i]);
         sqlite3VdbeAddOp2(v, OP_Integer, i, regChng);
         sqlite3VdbeAddOp3(v, OP_Column, iIdxCur, i, regTemp);
+        analyzeVdbeCommentIndexWithColumnName(v,pIdx,i);
         aGotoChng[i] = 
         sqlite3VdbeAddOp4(v, OP_Ne, regTemp, 0, regPrev+i, pColl, P4_COLLSEQ);
         sqlite3VdbeChangeP5(v, SQLITE_NULLEQ);
@@ -1158,6 +1211,7 @@ static void analyzeOneTable(
       for(i=0; i<nColTest; i++){
         sqlite3VdbeJumpHere(v, aGotoChng[i]);
         sqlite3VdbeAddOp3(v, OP_Column, iIdxCur, i, regPrev+i);
+        analyzeVdbeCommentIndexWithColumnName(v,pIdx,i);
       }
       sqlite3VdbeResolveLabel(v, endDistinctTest);
       sqlite3DbFree(db, aGotoChng);
@@ -1171,30 +1225,52 @@ static void analyzeOneTable(
     **   if !eof(csr) goto next_row;
     */
 #ifdef SQLITE_ENABLE_STAT4
-    assert( regRowid==(regStat4+2) );
-    if( HasRowid(pTab) ){
-      sqlite3VdbeAddOp2(v, OP_IdxRowid, iIdxCur, regRowid);
-    }else{
-      Index *pPk = sqlite3PrimaryKeyIndex(pIdx->pTable);
-      int j, k, regKey;
-      regKey = sqlite3GetTempRange(pParse, pPk->nKeyCol);
-      for(j=0; j<pPk->nKeyCol; j++){
-        k = sqlite3TableColumnToIndex(pIdx, pPk->aiColumn[j]);
-        assert( k>=0 && k<pIdx->nColumn );
-        sqlite3VdbeAddOp3(v, OP_Column, iIdxCur, k, regKey+j);
-        VdbeComment((v, "%s", pTab->aCol[pPk->aiColumn[j]].zName));
+    if( OptimizationEnabled(db, SQLITE_Stat4) ){
+      assert( regRowid==(regStat+2) );
+      if( HasRowid(pTab) ){
+        sqlite3VdbeAddOp2(v, OP_IdxRowid, iIdxCur, regRowid);
+      }else{
+        Index *pPk = sqlite3PrimaryKeyIndex(pIdx->pTable);
+        int j, k, regKey;
+        regKey = sqlite3GetTempRange(pParse, pPk->nKeyCol);
+        for(j=0; j<pPk->nKeyCol; j++){
+          k = sqlite3TableColumnToIndex(pIdx, pPk->aiColumn[j]);
+          assert( k>=0 && k<pIdx->nColumn );
+          sqlite3VdbeAddOp3(v, OP_Column, iIdxCur, k, regKey+j);
+          analyzeVdbeCommentIndexWithColumnName(v,pIdx,k);
+        }
+        sqlite3VdbeAddOp3(v, OP_MakeRecord, regKey, pPk->nKeyCol, regRowid);
+        sqlite3ReleaseTempRange(pParse, regKey, pPk->nKeyCol);
       }
-      sqlite3VdbeAddOp3(v, OP_MakeRecord, regKey, pPk->nKeyCol, regRowid);
-      sqlite3ReleaseTempRange(pParse, regKey, pPk->nKeyCol);
     }
 #endif
-    assert( regChng==(regStat4+1) );
-    sqlite3VdbeAddFunctionCall(pParse, 1, regStat4, regTemp, 2+IsStat4,
-                               &statPushFuncdef, 0);
-    sqlite3VdbeAddOp2(v, OP_Next, iIdxCur, addrNextRow); VdbeCoverage(v);
+    assert( regChng==(regStat+1) );
+    {
+      sqlite3VdbeAddFunctionCall(pParse, 1, regStat, regTemp, 2+IsStat4,
+                                 &statPushFuncdef, 0);
+      if( db->nAnalysisLimit ){
+        int j1, j2, j3;
+        j1 = sqlite3VdbeAddOp1(v, OP_IsNull, regTemp); VdbeCoverage(v);
+        j2 = sqlite3VdbeAddOp1(v, OP_If, regTemp); VdbeCoverage(v);
+        j3 = sqlite3VdbeAddOp4Int(v, OP_SeekGT, iIdxCur, 0, regPrev, 1);
+        VdbeCoverage(v);
+        sqlite3VdbeJumpHere(v, j1);
+        sqlite3VdbeAddOp2(v, OP_Next, iIdxCur, addrNextRow); VdbeCoverage(v);
+        sqlite3VdbeJumpHere(v, j2);
+        sqlite3VdbeJumpHere(v, j3);
+      }else{
+        sqlite3VdbeAddOp2(v, OP_Next, iIdxCur, addrNextRow); VdbeCoverage(v);
+      }
+    }
 
     /* Add the entry to the stat1 table. */
-    callStatGet(pParse, regStat4, STAT_GET_STAT1, regStat1);
+    if( pIdx->pPartIdxWhere ){
+      /* Partial indexes might get a zero-entry in sqlite_stat1.  But
+      ** an empty table is omitted from sqlite_stat1. */
+      sqlite3VdbeJumpHere(v, addrGotoEnd);
+      addrGotoEnd = 0;
+    }
+    callStatGet(pParse, regStat, STAT_GET_STAT1, regStat1);
     assert( "BBB"[0]==SQLITE_AFF_TEXT );
     sqlite3VdbeAddOp4(v, OP_MakeRecord, regTabname, 3, regTemp, "BBB", 0);
     sqlite3VdbeAddOp2(v, OP_NewRowid, iStatCur, regNewRowid);
@@ -1206,7 +1282,7 @@ static void analyzeOneTable(
 
     /* Add the entries to the stat4 table. */
 #ifdef SQLITE_ENABLE_STAT4
-    {
+    if( OptimizationEnabled(db, SQLITE_Stat4) && db->nAnalysisLimit==0 ){
       int regEq = regStat1;
       int regLt = regStat1+1;
       int regDLt = regStat1+2;
@@ -1217,15 +1293,50 @@ static void analyzeOneTable(
       int addrIsNull;
       u8 seekOp = HasRowid(pTab) ? OP_NotExists : OP_NotFound;
 
-      pParse->nMem = MAX(pParse->nMem, regCol+nCol);
+      /* No STAT4 data is generated if the number of rows is zero */
+      if( addrGotoEnd==0 ){
+        sqlite3VdbeAddOp2(v, OP_Cast, regStat1, SQLITE_AFF_INTEGER);
+        addrGotoEnd = sqlite3VdbeAddOp1(v, OP_IfNot, regStat1);
+        VdbeCoverage(v);
+      }
+
+      if( doOnce ){
+        int mxCol = nCol;
+        Index *pX;
+
+        /* Compute the maximum number of columns in any index */
+        for(pX=pTab->pIndex; pX; pX=pX->pNext){
+          int nColX;                     /* Number of columns in pX */
+          if( !HasRowid(pTab) && IsPrimaryKeyIndex(pX) ){
+            nColX = pX->nKeyCol;
+          }else{
+            nColX = pX->nColumn;
+          }
+          if( nColX>mxCol ) mxCol = nColX;
+        }
+
+        /* Allocate space to compute results for the largest index */
+        sqlite3TouchRegister(pParse, regCol+mxCol);
+        doOnce = 0;
+#ifdef SQLITE_DEBUG
+        /* Verify that the call to sqlite3ClearTempRegCache() below
+        ** really is needed.
+        ** https://sqlite.org/forum/forumpost/83cb4a95a0 (2023-03-25)
+        */
+        testcase( !sqlite3NoTempsInRange(pParse, regEq, regCol+mxCol) );
+#endif
+        sqlite3ClearTempRegCache(pParse);  /* tag-20230325-1 */
+        assert( sqlite3NoTempsInRange(pParse, regEq, regCol+mxCol) );
+      }
+      assert( sqlite3NoTempsInRange(pParse, regEq, regCol+nCol) );
 
       addrNext = sqlite3VdbeCurrentAddr(v);
-      callStatGet(pParse, regStat4, STAT_GET_ROWID, regSampleRowid);
+      callStatGet(pParse, regStat, STAT_GET_ROWID, regSampleRowid);
       addrIsNull = sqlite3VdbeAddOp1(v, OP_IsNull, regSampleRowid);
       VdbeCoverage(v);
-      callStatGet(pParse, regStat4, STAT_GET_NEQ, regEq);
-      callStatGet(pParse, regStat4, STAT_GET_NLT, regLt);
-      callStatGet(pParse, regStat4, STAT_GET_NDLT, regDLt);
+      callStatGet(pParse, regStat, STAT_GET_NEQ, regEq);
+      callStatGet(pParse, regStat, STAT_GET_NLT, regLt);
+      callStatGet(pParse, regStat, STAT_GET_NDLT, regDLt);
       sqlite3VdbeAddOp4Int(v, seekOp, iTabCur, addrNext, regSampleRowid, 0);
       VdbeCoverage(v);
       for(i=0; i<nCol; i++){
@@ -1241,7 +1352,7 @@ static void analyzeOneTable(
 #endif /* SQLITE_ENABLE_STAT4 */
 
     /* End of analysis */
-    sqlite3VdbeJumpHere(v, addrRewind);
+    if( addrGotoEnd ) sqlite3VdbeJumpHere(v, addrGotoEnd);
   }
 
 
@@ -1298,6 +1409,11 @@ static void analyzeDatabase(Parse *pParse, int iDb){
   for(k=sqliteHashFirst(&pSchema->tblHash); k; k=sqliteHashNext(k)){
     Table *pTab = (Table*)sqliteHashData(k);
     analyzeOneTable(pParse, pTab, 0, iStatCur, iMem, iTab);
+#ifdef SQLITE_ENABLE_STAT4
+    iMem = sqlite3FirstAvailableRegister(pParse, iMem);
+#else
+    assert( iMem==sqlite3FirstAvailableRegister(pParse,iMem) );
+#endif
   }
   loadAnalysis(pParse, iDb);
 }
@@ -1538,6 +1654,8 @@ static int analysisLoader(void *pData, int argc, char **argv, char **NotUsed){
 ** and its contents.
 */
 void sqlite3DeleteIndexSamples(sqlite3 *db, Index *pIdx){
+  assert( db!=0 );
+  assert( pIdx!=0 );
 #ifdef SQLITE_ENABLE_STAT4
   if( pIdx->aSample ){
     int j;
@@ -1547,7 +1665,7 @@ void sqlite3DeleteIndexSamples(sqlite3 *db, Index *pIdx){
     }
     sqlite3DbFree(db, pIdx->aSample);
   }
-  if( db && db->pnBytesFreed==0 ){
+  if( db->pnBytesFreed==0 ){
     pIdx->nSample = 0;
     pIdx->aSample = 0;
   }
@@ -1670,12 +1788,13 @@ static int loadStatTbl(
   while( sqlite3_step(pStmt)==SQLITE_ROW ){
     int nIdxCol = 1;              /* Number of columns in stat4 records */
 
-    char *zIndex;   /* Index name */
-    Index *pIdx;    /* Pointer to the index object */
-    int nSample;    /* Number of samples */
-    int nByte;      /* Bytes of space required */
-    int i;          /* Bytes of space required */
-    tRowcnt *pSpace;
+    char *zIndex;    /* Index name */
+    Index *pIdx;     /* Pointer to the index object */
+    int nSample;     /* Number of samples */
+    i64 nByte;       /* Bytes of space required */
+    i64 i;           /* Bytes of space required */
+    tRowcnt *pSpace; /* Available allocated memory space */
+    u8 *pPtr;        /* Available memory as a u8 for easier manipulation */
 
     zIndex = (char *)sqlite3_column_text(pStmt, 0);
     if( zIndex==0 ) continue;
@@ -1683,6 +1802,10 @@ static int loadStatTbl(
     pIdx = findIndexOrPrimaryKey(db, zIndex, zDb);
     assert( pIdx==0 || pIdx->nSample==0 );
     if( pIdx==0 ) continue;
+    if( pIdx->aSample!=0 ){
+      /* The same index appears in sqlite_stat4 under multiple names */
+      continue;
+    }
     assert( !HasRowid(pIdx->pTable) || pIdx->nColumn==pIdx->nKeyCol+1 );
     if( !HasRowid(pIdx->pTable) && IsPrimaryKeyIndex(pIdx) ){
       nIdxCol = pIdx->nKeyCol;
@@ -1690,7 +1813,8 @@ static int loadStatTbl(
       nIdxCol = pIdx->nColumn;
     }
     pIdx->nSampleCol = nIdxCol;
-    nByte = sizeof(IndexSample) * nSample;
+    pIdx->mxSample = nSample;
+    nByte = ROUND8(sizeof(IndexSample) * nSample);
     nByte += sizeof(tRowcnt) * nIdxCol * 3 * nSample;
     nByte += nIdxCol * sizeof(tRowcnt);     /* Space for Index.aAvgEq[] */
 
@@ -1699,8 +1823,12 @@ static int loadStatTbl(
       sqlite3_finalize(pStmt);
       return SQLITE_NOMEM_BKPT;
     }
-    pSpace = (tRowcnt*)&pIdx->aSample[nSample];
+    pPtr = (u8*)pIdx->aSample;
+    pPtr += ROUND8(nSample*sizeof(pIdx->aSample[0]));
+    pSpace = (tRowcnt*)pPtr;
+    assert( EIGHT_BYTE_ALIGNMENT( pSpace ) );
     pIdx->aAvgEq = pSpace; pSpace += nIdxCol;
+    pIdx->pTable->tabFlags |= TF_HasStat4;
     for(i=0; i<nSample; i++){
       pIdx->aSample[i].anEq = pSpace; pSpace += nIdxCol;
       pIdx->aSample[i].anLt = pSpace; pSpace += nIdxCol;
@@ -1728,6 +1856,11 @@ static int loadStatTbl(
     if( zIndex==0 ) continue;
     pIdx = findIndexOrPrimaryKey(db, zIndex, zDb);
     if( pIdx==0 ) continue;
+    if( pIdx->nSample>=pIdx->mxSample ){
+      /* Too many slots used because the same index appears in
+      ** sqlite_stat4 using multiple names */
+      continue;
+    }
     /* This next condition is true if data has already been loaded from 
     ** the sqlite_stat4 table. */
     nCol = pIdx->nSampleCol;
@@ -1740,14 +1873,15 @@ static int loadStatTbl(
     decodeIntArray((char*)sqlite3_column_text(pStmt,2),nCol,pSample->anLt,0,0);
     decodeIntArray((char*)sqlite3_column_text(pStmt,3),nCol,pSample->anDLt,0,0);
 
-    /* Take a copy of the sample. Add two 0x00 bytes the end of the buffer.
+    /* Take a copy of the sample. Add 8 extra 0x00 bytes the end of the buffer.
     ** This is in case the sample record is corrupted. In that case, the
     ** sqlite3VdbeRecordCompare() may read up to two varints past the
     ** end of the allocated buffer before it realizes it is dealing with
-    ** a corrupt record. Adding the two 0x00 bytes prevents this from causing
+    ** a corrupt record.  Or it might try to read a large integer from the
+    ** buffer.  In any case, eight 0x00 bytes prevents this from causing
     ** a buffer overread.  */
     pSample->n = sqlite3_column_bytes(pStmt, 4);
-    pSample->p = sqlite3DbMallocZero(db, pSample->n + 2);
+    pSample->p = sqlite3DbMallocZero(db, pSample->n + 8);
     if( pSample->p==0 ){
       sqlite3_finalize(pStmt);
       return SQLITE_NOMEM_BKPT;
@@ -1768,11 +1902,15 @@ static int loadStatTbl(
 */
 static int loadStat4(sqlite3 *db, const char *zDb){
   int rc = SQLITE_OK;             /* Result codes from subroutines */
+  const Table *pStat4;
 
   assert( db->lookaside.bDisable );
-  if( sqlite3FindTable(db, "sqlite_stat4", zDb) ){
+  if( OptimizationEnabled(db, SQLITE_Stat4)
+   && (pStat4 = sqlite3FindTable(db, "sqlite_stat4", zDb))!=0
+   && IsOrdinaryTable(pStat4)
+  ){
     rc = loadStatTbl(db,
-      "SELECT idx,count(*) FROM %Q.sqlite_stat4 GROUP BY idx", 
+      "SELECT idx,count(*) FROM %Q.sqlite_stat4 GROUP BY idx COLLATE nocase", 
       "SELECT idx,neq,nlt,ndlt,sample FROM %Q.sqlite_stat4",
       zDb
     );
@@ -1807,6 +1945,7 @@ int sqlite3AnalysisLoad(sqlite3 *db, int iDb){
   char *zSql;
   int rc = SQLITE_OK;
   Schema *pSchema = db->aDb[iDb].pSchema;
+  const Table *pStat1;
 
   assert( iDb>=0 && iDb<db->nDb );
   assert( db->aDb[iDb].pBt!=0 );
@@ -1829,7 +1968,9 @@ int sqlite3AnalysisLoad(sqlite3 *db, int iDb){
   /* Load new statistics out of the sqlite_stat1 table */
   sInfo.db = db;
   sInfo.zDatabase = db->aDb[iDb].zDbSName;
-  if( sqlite3FindTable(db, "sqlite_stat1", sInfo.zDatabase)!=0 ){
+  if( (pStat1 = sqlite3FindTable(db, "sqlite_stat1", sInfo.zDatabase))
+   && IsOrdinaryTable(pStat1)
+  ){
     zSql = sqlite3MPrintf(db, 
         "SELECT tbl,idx,stat FROM %Q.sqlite_stat1", sInfo.zDatabase);
     if( zSql==0 ){

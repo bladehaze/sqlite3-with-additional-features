@@ -185,6 +185,7 @@ void sqlite3SetTextEncoding(sqlite3 *db, u8 enc){
   ** strings is BINARY. 
   */
   db->pDfltColl = sqlite3FindCollSeq(db, enc, sqlite3StrBINARY, 0);
+  sqlite3ExpirePreparedStatements(db, 1);
 }
 
 /*
@@ -301,12 +302,18 @@ static int matchQuality(
   u8 enc          /* Desired text encoding */
 ){
   int match;
-  assert( p->nArg>=-1 );
+  assert( p->nArg>=(-4) && p->nArg!=(-2) );
+  assert( nArg>=(-2) );
 
   /* Wrong number of arguments means "no match" */
   if( p->nArg!=nArg ){
-    if( nArg==(-2) ) return (p->xSFunc==0) ? 0 : FUNC_PERFECT_MATCH;
+    if( nArg==(-2) ) return p->xSFunc==0 ? 0 : FUNC_PERFECT_MATCH;
     if( p->nArg>=0 ) return 0;
+    /* Special p->nArg values available to built-in functions only:
+    **    -3     1 or more arguments required
+    **    -4     2 or more arguments required
+    */
+    if( p->nArg<(-2) && nArg<(-2-p->nArg) ) return 0;
   }
 
   /* Give a better score to a function with a specific number of arguments
@@ -337,6 +344,7 @@ FuncDef *sqlite3FunctionSearch(
 ){
   FuncDef *p;
   for(p=sqlite3BuiltinFunctions.a[h]; p; p=p->u.pHash){
+    assert( p->funcFlags & SQLITE_FUNC_BUILTIN );
     if( sqlite3StrICmp(p->zName, zFunc)==0 ){
       return p;
     }
@@ -357,7 +365,7 @@ void sqlite3InsertBuiltinFuncs(
     const char *zName = aDef[i].zName;
     int nName = sqlite3Strlen30(zName);
     int h = SQLITE_FUNC_HASH(zName[0], nName);
-    assert( zName[0]>='a' && zName[0]<='z' );
+    assert( aDef[i].funcFlags & SQLITE_FUNC_BUILTIN );
     pOther = sqlite3FunctionSearch(h, zName);
     if( pOther ){
       assert( pOther!=&aDef[i] && pOther->pNext!=&aDef[i] );
@@ -489,19 +497,22 @@ void sqlite3SchemaClear(void *p){
   Hash temp2;
   HashElem *pElem;
   Schema *pSchema = (Schema *)p;
+  sqlite3 xdb;
 
+  memset(&xdb, 0, sizeof(xdb));
   temp1 = pSchema->tblHash;
   temp2 = pSchema->trigHash;
   sqlite3HashInit(&pSchema->trigHash);
   sqlite3HashClear(&pSchema->idxHash);
   for(pElem=sqliteHashFirst(&temp2); pElem; pElem=sqliteHashNext(pElem)){
-    sqlite3DeleteTrigger(0, (Trigger*)sqliteHashData(pElem));
+    sqlite3DeleteTrigger(&xdb, (Trigger*)sqliteHashData(pElem));
   }
+
   sqlite3HashClear(&temp2);
   sqlite3HashInit(&pSchema->tblHash);
   for(pElem=sqliteHashFirst(&temp1); pElem; pElem=sqliteHashNext(pElem)){
     Table *pTab = sqliteHashData(pElem);
-    sqlite3DeleteTable(0, pTab);
+    sqlite3DeleteTable(&xdb, pTab);
   }
   sqlite3HashClear(&temp1);
   sqlite3HashClear(&pSchema->fkeyHash);

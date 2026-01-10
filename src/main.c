@@ -25,25 +25,75 @@
 #if defined(SQLITE_ENABLE_ICU) || defined(SQLITE_ENABLE_ICU_COLLATIONS)
 # include "sqliteicu.h"
 #endif
-#ifdef SQLITE_ENABLE_JSON1
-int sqlite3Json1Init(sqlite3*);
+
+/*
+** This is an extension initializer that is a no-op and always
+** succeeds, except that it fails if the fault-simulation is set
+** to 500.
+*/
+static int sqlite3TestExtInit(sqlite3 *db){
+  (void)db;
+  return sqlite3FaultSim(500);
+}
+
+
+/*
+** Forward declarations of external module initializer functions
+** for modules that need them.
+*/
+#ifdef SQLITE_ENABLE_FTS5
+int sqlite3Fts5Init(sqlite3*);
 #endif
 #ifdef SQLITE_ENABLE_STMTVTAB
 int sqlite3StmtVtabInit(sqlite3*);
 #endif
-#ifdef SQLITE_ENABLE_FTS5
-int sqlite3Fts5Init(sqlite3*);
+#ifdef SQLITE_EXTRA_AUTOEXT
+int SQLITE_EXTRA_AUTOEXT(sqlite3*);
 #endif
+/*
+** An array of pointers to extension initializer functions for
+** built-in extensions.
+*/
+static int (*const sqlite3BuiltinExtensions[])(sqlite3*) = {
+#ifdef SQLITE_ENABLE_FTS3
+  sqlite3Fts3Init,
+#endif
+#ifdef SQLITE_ENABLE_FTS5
+  sqlite3Fts5Init,
+#endif
+#if defined(SQLITE_ENABLE_ICU) || defined(SQLITE_ENABLE_ICU_COLLATIONS)
+  sqlite3IcuInit,
+#endif
+#ifdef SQLITE_ENABLE_RTREE
+  sqlite3RtreeInit,
+#endif
+#ifdef SQLITE_ENABLE_DBPAGE_VTAB
+  sqlite3DbpageRegister,
+#endif
+#ifdef SQLITE_ENABLE_DBSTAT_VTAB
+  sqlite3DbstatRegister,
+#endif
+  sqlite3TestExtInit,
+#ifdef SQLITE_ENABLE_STMTVTAB
+  sqlite3StmtVtabInit,
+#endif
+#ifdef SQLITE_ENABLE_BYTECODE_VTAB
+  sqlite3VdbeBytecodeVtabInit,
+#endif
+#ifdef SQLITE_EXTRA_AUTOEXT
+  SQLITE_EXTRA_AUTOEXT,
+#endif
+};
 
 #ifndef SQLITE_AMALGAMATION
 /* IMPLEMENTATION-OF: R-46656-45156 The sqlite3_version[] string constant
-** contains the text of SQLITE_VERSION macro. 
+** contains the text of SQLITE_VERSION macro.
 */
 const char sqlite3_version[] = SQLITE_VERSION;
 #endif
 
 /* IMPLEMENTATION-OF: R-53536-42575 The sqlite3_libversion() function returns
-** a pointer to the to the sqlite3_version[] string constant. 
+** a pointer to the to the sqlite3_version[] string constant.
 */
 const char *sqlite3_libversion(void){ return sqlite3_version; }
 
@@ -107,13 +157,13 @@ char *sqlite3_temp_directory = 0;
 char *sqlite3_data_directory = 0;
 
 /*
-** Initialize SQLite.  
+** Initialize SQLite. 
 **
 ** This routine must be called to initialize the memory allocation,
 ** VFS, and mutex subsystems prior to doing any serious work with
 ** SQLite.  But as long as you do not compile with SQLITE_OMIT_AUTOINIT
 ** this routine will be called automatically by key routines such as
-** sqlite3_open().  
+** sqlite3_open(). 
 **
 ** This routine is a no-op except on its very first call for the process,
 ** or for the first call after a call to sqlite3_shutdown.
@@ -138,7 +188,7 @@ char *sqlite3_data_directory = 0;
 **       without blocking.
 */
 int sqlite3_initialize(void){
-  MUTEX_LOGIC( sqlite3_mutex *pMaster; )       /* The main static mutex */
+  MUTEX_LOGIC( sqlite3_mutex *pMainMtx; )      /* The main static mutex */
   int rc;                                      /* Result code */
 #ifdef SQLITE_EXTRA_INIT
   int bRunExtraInit = 0;                       /* Extra initialization needed */
@@ -166,7 +216,7 @@ int sqlite3_initialize(void){
     return SQLITE_OK;
   }
 
-  /* Make sure the mutex subsystem is initialized.  If unable to 
+  /* Make sure the mutex subsystem is initialized.  If unable to
   ** initialize the mutex subsystem, return early with the error.
   ** If the system is so sick that we are unable to allocate a mutex,
   ** there is not much SQLite is going to be able to do.
@@ -178,13 +228,13 @@ int sqlite3_initialize(void){
   if( rc ) return rc;
 
   /* Initialize the malloc() system and the recursive pInitMutex mutex.
-  ** This operation is protected by the STATIC_MASTER mutex.  Note that
+  ** This operation is protected by the STATIC_MAIN mutex.  Note that
   ** MutexAlloc() is called for a static mutex prior to initializing the
   ** malloc subsystem - this implies that the allocation of a static
   ** mutex must not require support from the malloc subsystem.
   */
-  MUTEX_LOGIC( pMaster = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MASTER); )
-  sqlite3_mutex_enter(pMaster);
+  MUTEX_LOGIC( pMainMtx = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MAIN); )
+  sqlite3_mutex_enter(pMainMtx);
   sqlite3GlobalConfig.isMutexInit = 1;
   if( !sqlite3GlobalConfig.isMallocInit ){
     rc = sqlite3MallocInit();
@@ -202,7 +252,7 @@ int sqlite3_initialize(void){
   if( rc==SQLITE_OK ){
     sqlite3GlobalConfig.nRefInitMutex++;
   }
-  sqlite3_mutex_leave(pMaster);
+  sqlite3_mutex_leave(pMainMtx);
 
   /* If rc is not SQLITE_OK at this point, then either the malloc
   ** subsystem could not be initialized or the system failed to allocate
@@ -242,14 +292,23 @@ int sqlite3_initialize(void){
       sqlite3GlobalConfig.isPCacheInit = 1;
       rc = sqlite3OsInit();
     }
-#ifdef SQLITE_ENABLE_DESERIALIZE
+#ifndef SQLITE_OMIT_DESERIALIZE
     if( rc==SQLITE_OK ){
       rc = sqlite3MemdbInit();
     }
 #endif
     if( rc==SQLITE_OK ){
-      sqlite3PCacheBufferSetup( sqlite3GlobalConfig.pPage, 
+      sqlite3PCacheBufferSetup( sqlite3GlobalConfig.pPage,
           sqlite3GlobalConfig.szPage, sqlite3GlobalConfig.nPage);
+#ifdef SQLITE_EXTRA_INIT_MUTEXED
+      {
+        int SQLITE_EXTRA_INIT_MUTEXED(const char*);
+        rc = SQLITE_EXTRA_INIT_MUTEXED(0);
+      }
+#endif
+    }
+    if( rc==SQLITE_OK ){
+      sqlite3MemoryBarrier();
       sqlite3GlobalConfig.isInit = 1;
 #ifdef SQLITE_EXTRA_INIT
       bRunExtraInit = 1;
@@ -262,14 +321,14 @@ int sqlite3_initialize(void){
   /* Go back under the static mutex and clean up the recursive
   ** mutex to prevent a resource leak.
   */
-  sqlite3_mutex_enter(pMaster);
+  sqlite3_mutex_enter(pMainMtx);
   sqlite3GlobalConfig.nRefInitMutex--;
   if( sqlite3GlobalConfig.nRefInitMutex<=0 ){
     assert( sqlite3GlobalConfig.nRefInitMutex==0 );
     sqlite3_mutex_free(sqlite3GlobalConfig.pInitMutex);
     sqlite3GlobalConfig.pInitMutex = 0;
   }
-  sqlite3_mutex_leave(pMaster);
+  sqlite3_mutex_leave(pMainMtx);
 
   /* The following is just a sanity check to make sure SQLite has
   ** been compiled correctly.  It is important to run this code, but
@@ -299,7 +358,6 @@ int sqlite3_initialize(void){
     rc = SQLITE_EXTRA_INIT(0);
   }
 #endif
-
   return rc;
 }
 
@@ -369,9 +427,21 @@ int sqlite3_config(int op, ...){
   va_list ap;
   int rc = SQLITE_OK;
 
-  /* sqlite3_config() shall return SQLITE_MISUSE if it is invoked while
-  ** the SQLite library is in use. */
-  if( sqlite3GlobalConfig.isInit ) return SQLITE_MISUSE_BKPT;
+  /* sqlite3_config() normally returns SQLITE_MISUSE if it is invoked while
+  ** the SQLite library is in use.  Except, a few selected opcodes
+  ** are allowed.
+  */
+  if( sqlite3GlobalConfig.isInit ){
+    static const u64 mAnytimeConfigOption = 0
+       | MASKBIT64( SQLITE_CONFIG_LOG )
+       | MASKBIT64( SQLITE_CONFIG_PCACHE_HDRSZ )
+    ;
+    if( op<0 || op>63 || (MASKBIT64(op) & mAnytimeConfigOption)==0 ){
+      return SQLITE_MISUSE_BKPT;
+    }
+    testcase( op==SQLITE_CONFIG_LOG );
+    testcase( op==SQLITE_CONFIG_PCACHE_HDRSZ );
+  }
 
   va_start(ap, op);
   switch( op ){
@@ -440,6 +510,7 @@ int sqlite3_config(int op, ...){
       break;
     }
     case SQLITE_CONFIG_MEMSTATUS: {
+      assert( !sqlite3GlobalConfig.isInit );  /* Cannot change at runtime */
       /* EVIDENCE-OF: R-61275-35157 The SQLITE_CONFIG_MEMSTATUS option takes
       ** single argument of type int, interpreted as a boolean, which enables
       ** or disables the collection of memory allocation statistics. */
@@ -465,7 +536,7 @@ int sqlite3_config(int op, ...){
       ** a single parameter which is a pointer to an integer and writes into
       ** that integer the number of extra bytes per page required for each page
       ** in SQLITE_CONFIG_PAGECACHE. */
-      *va_arg(ap, int*) = 
+      *va_arg(ap, int*) =
           sqlite3HeaderSizeBtree() +
           sqlite3HeaderSizePcache() +
           sqlite3HeaderSizePcache1();
@@ -552,7 +623,7 @@ int sqlite3_config(int op, ...){
       sqlite3GlobalConfig.nLookaside = va_arg(ap, int);
       break;
     }
-    
+   
     /* Record a pointer to the logger function and its first argument.
     ** The default is NULL.  Logging is disabled if the function pointer is
     ** NULL.
@@ -563,8 +634,10 @@ int sqlite3_config(int op, ...){
       ** sqlite3GlobalConfig.xLog = va_arg(ap, void(*)(void*,int,const char*));
       */
       typedef void(*LOGFUNC_t)(void*,int,const char*);
-      sqlite3GlobalConfig.xLog = va_arg(ap, LOGFUNC_t);
-      sqlite3GlobalConfig.pLogArg = va_arg(ap, void*);
+      LOGFUNC_t xLog = va_arg(ap, LOGFUNC_t);
+      void *pLogArg = va_arg(ap, void*);
+      AtomicStore(&sqlite3GlobalConfig.xLog, xLog);
+      AtomicStore(&sqlite3GlobalConfig.pLogArg, pLogArg);
       break;
     }
 
@@ -578,7 +651,8 @@ int sqlite3_config(int op, ...){
       ** argument of type int. If non-zero, then URI handling is globally
       ** enabled. If the parameter is zero, then URI handling is globally
       ** disabled. */
-      sqlite3GlobalConfig.bOpenUri = va_arg(ap, int);
+      int bOpenUri = va_arg(ap, int);
+      AtomicStore(&sqlite3GlobalConfig.bOpenUri, bOpenUri);
       break;
     }
 
@@ -656,12 +730,24 @@ int sqlite3_config(int op, ...){
     }
 #endif /* SQLITE_ENABLE_SORTER_REFERENCES */
 
-#ifdef SQLITE_ENABLE_DESERIALIZE
+#ifndef SQLITE_OMIT_DESERIALIZE
     case SQLITE_CONFIG_MEMDB_MAXSIZE: {
       sqlite3GlobalConfig.mxMemdbSize = va_arg(ap, sqlite3_int64);
       break;
     }
-#endif /* SQLITE_ENABLE_DESERIALIZE */
+#endif /* SQLITE_OMIT_DESERIALIZE */
+
+    case SQLITE_CONFIG_ROWID_IN_VIEW: {
+      int *pVal = va_arg(ap,int*);
+#ifdef SQLITE_ALLOW_ROWID_IN_VIEW
+      if( 0==*pVal ) sqlite3GlobalConfig.mNoVisibleRowid = TF_NoVisibleRowid;
+      if( 1==*pVal ) sqlite3GlobalConfig.mNoVisibleRowid = 0;
+      *pVal = (sqlite3GlobalConfig.mNoVisibleRowid==0);
+#else
+      *pVal = 0;
+#endif
+      break;
+    }
 
     default: {
       rc = SQLITE_ERROR;
@@ -674,44 +760,54 @@ int sqlite3_config(int op, ...){
 
 /*
 ** Set up the lookaside buffers for a database connection.
-** Return SQLITE_OK on success.  
+** Return SQLITE_OK on success. 
 ** If lookaside is already active, return SQLITE_BUSY.
 **
 ** The sz parameter is the number of bytes in each lookaside slot.
-** The cnt parameter is the number of slots.  If pStart is NULL the
-** space for the lookaside memory is obtained from sqlite3_malloc().
-** If pStart is not NULL then it is sz*cnt bytes of memory to use for
-** the lookaside memory.
+** The cnt parameter is the number of slots.  If pBuf is NULL the
+** space for the lookaside memory is obtained from sqlite3_malloc()
+** or similar.  If pBuf is not NULL then it is sz*cnt bytes of memory
+** to use for the lookaside memory.
 */
-static int setupLookaside(sqlite3 *db, void *pBuf, int sz, int cnt){
+static int setupLookaside(
+  sqlite3 *db,    /* Database connection being configured */
+  void *pBuf,     /* Memory to use for lookaside.  May be NULL */
+  int sz,         /* Desired size of each lookaside memory slot */
+  int cnt         /* Number of slots to allocate */
+){
 #ifndef SQLITE_OMIT_LOOKASIDE
-  void *pStart;
-  sqlite3_int64 szAlloc = sz*(sqlite3_int64)cnt;
-  int nBig;   /* Number of full-size slots */
-  int nSm;    /* Number smaller LOOKASIDE_SMALL-byte slots */
-  
+  void *pStart;          /* Start of the lookaside buffer */
+  sqlite3_int64 szAlloc; /* Total space set aside for lookaside memory */
+  int nBig;              /* Number of full-size slots */
+  int nSm;               /* Number smaller LOOKASIDE_SMALL-byte slots */
+ 
   if( sqlite3LookasideUsed(db,0)>0 ){
     return SQLITE_BUSY;
   }
   /* Free any existing lookaside buffer for this handle before
-  ** allocating a new one so we don't have to have space for 
+  ** allocating a new one so we don't have to have space for
   ** both at the same time.
   */
   if( db->lookaside.bMalloced ){
     sqlite3_free(db->lookaside.pStart);
   }
   /* The size of a lookaside slot after ROUNDDOWN8 needs to be larger
-  ** than a pointer to be useful.
+  ** than a pointer and small enough to fit in a u16.
   */
-  sz = ROUNDDOWN8(sz);  /* IMP: R-33038-09382 */
+  sz = ROUNDDOWN8(sz);
   if( sz<=(int)sizeof(LookasideSlot*) ) sz = 0;
-  if( cnt<0 ) cnt = 0;
-  if( sz==0 || cnt==0 ){
+  if( sz>65528 ) sz = 65528;
+  /* Count must be at least 1 to be useful, but not so large as to use
+  ** more than 0x7fff0000 total bytes for lookaside. */
+  if( cnt<1 ) cnt = 0;
+  if( sz>0 && cnt>(0x7fff0000/sz) ) cnt = 0x7fff0000/sz;
+  szAlloc = (i64)sz*(i64)cnt;
+  if( szAlloc==0 ){
     sz = 0;
     pStart = 0;
   }else if( pBuf==0 ){
     sqlite3BeginBenignMalloc();
-    pStart = sqlite3Malloc( szAlloc );  /* IMP: R-61949-35727 */
+    pStart = sqlite3Malloc( szAlloc );
     sqlite3EndBenignMalloc();
     if( pStart ) szAlloc = sqlite3MallocSize(pStart);
   }else{
@@ -720,10 +816,10 @@ static int setupLookaside(sqlite3 *db, void *pBuf, int sz, int cnt){
 #ifndef SQLITE_OMIT_TWOSIZE_LOOKASIDE
   if( sz>=LOOKASIDE_SMALL*3 ){
     nBig = szAlloc/(3*LOOKASIDE_SMALL+sz);
-    nSm = (szAlloc - sz*nBig)/LOOKASIDE_SMALL;
+    nSm = (szAlloc - (i64)sz*(i64)nBig)/LOOKASIDE_SMALL;
   }else if( sz>=LOOKASIDE_SMALL*2 ){
     nBig = szAlloc/(LOOKASIDE_SMALL+sz);
-    nSm = (szAlloc - sz*nBig)/LOOKASIDE_SMALL;
+    nSm = (szAlloc - (i64)sz*(i64)nBig)/LOOKASIDE_SMALL;
   }else
 #endif /* SQLITE_OMIT_TWOSIZE_LOOKASIDE */
   if( sz>0 ){
@@ -763,18 +859,19 @@ static int setupLookaside(sqlite3 *db, void *pBuf, int sz, int cnt){
     db->lookaside.bMalloced = pBuf==0 ?1:0;
     db->lookaside.nSlot = nBig+nSm;
   }else{
-    db->lookaside.pStart = db;
+    db->lookaside.pStart = 0;
 #ifndef SQLITE_OMIT_TWOSIZE_LOOKASIDE
     db->lookaside.pSmallInit = 0;
     db->lookaside.pSmallFree = 0;
-    db->lookaside.pMiddle = db;
+    db->lookaside.pMiddle = 0;
 #endif /* SQLITE_OMIT_TWOSIZE_LOOKASIDE */
-    db->lookaside.pEnd = db;
+    db->lookaside.pEnd = 0;
     db->lookaside.bDisable = 1;
     db->lookaside.sz = 0;
     db->lookaside.bMalloced = 0;
     db->lookaside.nSlot = 0;
   }
+  db->lookaside.pTrueEnd = db->lookaside.pEnd;
   assert( sqlite3LookasideUsed(db,0)==0 );
 #endif /* SQLITE_OMIT_LOOKASIDE */
   return SQLITE_OK;
@@ -833,7 +930,7 @@ int sqlite3_db_cacheflush(sqlite3 *db){
   sqlite3BtreeEnterAll(db);
   for(i=0; rc==SQLITE_OK && i<db->nDb; i++){
     Btree *pBt = db->aDb[i].pBt;
-    if( pBt && sqlite3BtreeIsInTrans(pBt) ){
+    if( pBt && sqlite3BtreeTxnState(pBt)==SQLITE_TXN_WRITE ){
       Pager *pPager = sqlite3BtreePager(pBt);
       rc = sqlite3PagerFlush(pPager);
       if( rc==SQLITE_BUSY ){
@@ -853,6 +950,11 @@ int sqlite3_db_cacheflush(sqlite3 *db){
 int sqlite3_db_config(sqlite3 *db, int op, ...){
   va_list ap;
   int rc;
+
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( !sqlite3SafetyCheckOk(db) ) return SQLITE_MISUSE_BKPT;
+#endif
+  sqlite3_mutex_enter(db->mutex);
   va_start(ap, op);
   switch( op ){
     case SQLITE_DBCONFIG_MAINDBNAME: {
@@ -872,7 +974,7 @@ int sqlite3_db_config(sqlite3 *db, int op, ...){
     default: {
       static const struct {
         int op;      /* The opcode */
-        u32 mask;    /* Mask of the bit in sqlite3.flags to set/clear */
+        u64 mask;    /* Mask of the bit in sqlite3.flags to set/clear */
       } aFlagOp[] = {
         { SQLITE_DBCONFIG_ENABLE_FKEY,           SQLITE_ForeignKeys    },
         { SQLITE_DBCONFIG_ENABLE_TRIGGER,        SQLITE_EnableTrigger  },
@@ -891,6 +993,11 @@ int sqlite3_db_config(sqlite3 *db, int op, ...){
         { SQLITE_DBCONFIG_DQS_DML,               SQLITE_DqsDML         },
         { SQLITE_DBCONFIG_LEGACY_FILE_FORMAT,    SQLITE_LegacyFileFmt  },
         { SQLITE_DBCONFIG_TRUSTED_SCHEMA,        SQLITE_TrustedSchema  },
+        { SQLITE_DBCONFIG_STMT_SCANSTATUS,       SQLITE_StmtScanStatus },
+        { SQLITE_DBCONFIG_REVERSE_SCANORDER,     SQLITE_ReverseOrder   },
+        { SQLITE_DBCONFIG_ENABLE_ATTACH_CREATE,  SQLITE_AttachCreate   },
+        { SQLITE_DBCONFIG_ENABLE_ATTACH_WRITE,   SQLITE_AttachWrite    },
+        { SQLITE_DBCONFIG_ENABLE_COMMENTS,       SQLITE_Comments       },
       };
       unsigned int i;
       rc = SQLITE_ERROR; /* IMP: R-42790-23372 */
@@ -918,6 +1025,7 @@ int sqlite3_db_config(sqlite3 *db, int op, ...){
     }
   }
   va_end(ap);
+  sqlite3_mutex_leave(db->mutex);
   return rc;
 }
 
@@ -969,7 +1077,7 @@ int sqlite3IsBinary(const CollSeq *p){
 }
 
 /*
-** Another built-in collating sequence: NOCASE. 
+** Another built-in collating sequence: NOCASE.
 **
 ** This collating sequence is intended to be used for "case independent
 ** comparison". SQLite's knowledge of upper and lower case equivalents
@@ -1022,7 +1130,7 @@ void sqlite3_set_last_insert_rowid(sqlite3 *db, sqlite3_int64 iRowid){
 /*
 ** Return the number of changes in the most recent call to sqlite3_exec().
 */
-int sqlite3_changes(sqlite3 *db){
+sqlite3_int64 sqlite3_changes64(sqlite3 *db){
 #ifdef SQLITE_ENABLE_API_ARMOR
   if( !sqlite3SafetyCheckOk(db) ){
     (void)SQLITE_MISUSE_BKPT;
@@ -1031,11 +1139,14 @@ int sqlite3_changes(sqlite3 *db){
 #endif
   return db->nChange;
 }
+int sqlite3_changes(sqlite3 *db){
+  return (int)sqlite3_changes64(db);
+}
 
 /*
 ** Return the number of changes since the database handle was opened.
 */
-int sqlite3_total_changes(sqlite3 *db){
+sqlite3_int64 sqlite3_total_changes64(sqlite3 *db){
 #ifdef SQLITE_ENABLE_API_ARMOR
   if( !sqlite3SafetyCheckOk(db) ){
     (void)SQLITE_MISUSE_BKPT;
@@ -1043,6 +1154,9 @@ int sqlite3_total_changes(sqlite3 *db){
   }
 #endif
   return db->nTotalChange;
+}
+int sqlite3_total_changes(sqlite3 *db){
+  return (int)sqlite3_total_changes64(db);
 }
 
 /*
@@ -1068,7 +1182,9 @@ void sqlite3CloseSavepoints(sqlite3 *db){
 ** with SQLITE_ANY as the encoding.
 */
 static void functionDestroy(sqlite3 *db, FuncDef *p){
-  FuncDestructor *pDestructor = p->u.pDestructor;
+  FuncDestructor *pDestructor;
+  assert( (p->funcFlags & SQLITE_FUNC_BUILTIN)==0 );
+  pDestructor = p->u.pDestructor;
   if( pDestructor ){
     pDestructor->nRef--;
     if( pDestructor->nRef==0 ){
@@ -1111,7 +1227,7 @@ static void disconnectAllVtab(sqlite3 *db){
 
 /*
 ** Return TRUE if database connection db has unfinalized prepared
-** statements or unfinished sqlite3_backup objects.  
+** statements or unfinished sqlite3_backup objects. 
 */
 static int connectionIsBusy(sqlite3 *db){
   int j;
@@ -1138,7 +1254,7 @@ static int sqlite3Close(sqlite3 *db, int forceZombie){
   }
   sqlite3_mutex_enter(db->mutex);
   if( db->mTrace & SQLITE_TRACE_CLOSE ){
-    db->xTrace(SQLITE_TRACE_CLOSE, db->pTraceArg, db, 0);
+    db->trace.xV2(SQLITE_TRACE_CLOSE, db->pTraceArg, db, 0);
   }
 
   /* Force xDisconnect calls on all virtual tables */
@@ -1170,17 +1286,55 @@ static int sqlite3Close(sqlite3 *db, int forceZombie){
   }
 #endif
 
+  while( db->pDbData ){
+    DbClientData *p = db->pDbData;
+    db->pDbData = p->pNext;
+    assert( p->pData!=0 );
+    if( p->xDestructor ) p->xDestructor(p->pData);
+    sqlite3_free(p);
+  }
+
   /* Convert the connection into a zombie and then close it.
   */
-  db->magic = SQLITE_MAGIC_ZOMBIE;
+  db->eOpenState = SQLITE_STATE_ZOMBIE;
   sqlite3LeaveMutexAndCloseZombie(db);
   return SQLITE_OK;
 }
 
 /*
+** Return the transaction state for a single databse, or the maximum
+** transaction state over all attached databases if zSchema is null.
+*/
+int sqlite3_txn_state(sqlite3 *db, const char *zSchema){
+  int iDb, nDb;
+  int iTxn = -1;
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( !sqlite3SafetyCheckOk(db) ){
+    (void)SQLITE_MISUSE_BKPT;
+    return -1;
+  }
+#endif
+  sqlite3_mutex_enter(db->mutex);
+  if( zSchema ){
+    nDb = iDb = sqlite3FindDbName(db, zSchema);
+    if( iDb<0 ) nDb--;
+  }else{
+    iDb = 0;
+    nDb = db->nDb-1;
+  }
+  for(; iDb<=nDb; iDb++){
+    Btree *pBt = db->aDb[iDb].pBt;
+    int x = pBt!=0 ? sqlite3BtreeTxnState(pBt) : SQLITE_TXN_NONE;
+    if( x>iTxn ) iTxn = x;
+  }
+  sqlite3_mutex_leave(db->mutex);
+  return iTxn;
+}
+
+/*
 ** Two variations on the public interface for closing a database
 ** connection. The sqlite3_close() version returns SQLITE_BUSY and
-** leaves the connection option if there are unfinalized prepared
+** leaves the connection open if there are unfinalized prepared
 ** statements or unfinished sqlite3_backups.  The sqlite3_close_v2()
 ** version forces the connection to become a zombie if there are
 ** unclosed resources, and arranges for deallocation when the last
@@ -1206,7 +1360,7 @@ void sqlite3LeaveMutexAndCloseZombie(sqlite3 *db){
   ** or if the connection has not yet been closed by sqlite3_close_v2(),
   ** then just leave the mutex and return.
   */
-  if( db->magic!=SQLITE_MAGIC_ZOMBIE || connectionIsBusy(db) ){
+  if( db->eOpenState!=SQLITE_STATE_ZOMBIE || connectionIsBusy(db) ){
     sqlite3_mutex_leave(db->mutex);
     return;
   }
@@ -1240,6 +1394,7 @@ void sqlite3LeaveMutexAndCloseZombie(sqlite3 *db){
   /* Clear the TEMP schema separately and last */
   if( db->aDb[1].pSchema ){
     sqlite3SchemaClear(db->aDb[1].pSchema);
+    assert( db->aDb[1].pSchema->trigHash.count==0 );
   }
   sqlite3VtabUnlockList(db);
 
@@ -1287,22 +1442,21 @@ void sqlite3LeaveMutexAndCloseZombie(sqlite3 *db){
   sqlite3Error(db, SQLITE_OK); /* Deallocates any cached error strings. */
   sqlite3ValueFree(db->pErr);
   sqlite3CloseExtensions(db);
-#if SQLITE_USER_AUTHENTICATION
-  sqlite3_free(db->auth.zAuthUser);
-  sqlite3_free(db->auth.zAuthPW);
-#endif
 
-  db->magic = SQLITE_MAGIC_ERROR;
+  db->eOpenState = SQLITE_STATE_ERROR;
 
   /* The temp-database schema is allocated differently from the other schema
   ** objects (using sqliteMalloc() directly, instead of sqlite3BtreeSchema()).
   ** So it needs to be freed here. Todo: Why not roll the temp schema into
-  ** the same sqliteMalloc() as the one that allocates the database 
+  ** the same sqliteMalloc() as the one that allocates the database
   ** structure?
   */
   sqlite3DbFree(db, db->aDb[1].pSchema);
+  if( db->xAutovacDestr ){
+    db->xAutovacDestr(db->pAutovacPagesArg);
+  }
   sqlite3_mutex_leave(db->mutex);
-  db->magic = SQLITE_MAGIC_CLOSED;
+  db->eOpenState = SQLITE_STATE_CLOSED;
   sqlite3_mutex_free(db->mutex);
   assert( sqlite3LookasideUsed(db,0)==0 );
   if( db->lookaside.bMalloced ){
@@ -1325,7 +1479,7 @@ void sqlite3RollbackAll(sqlite3 *db, int tripCode){
   assert( sqlite3_mutex_held(db->mutex) );
   sqlite3BeginBenignMalloc();
 
-  /* Obtain all b-tree mutexes before making any calls to BtreeRollback(). 
+  /* Obtain all b-tree mutexes before making any calls to BtreeRollback().
   ** This is important in case the transaction being rolled back has
   ** modified the database schema. If the b-tree mutexes are not taken
   ** here, then another shared-cache connection might sneak in between
@@ -1337,7 +1491,7 @@ void sqlite3RollbackAll(sqlite3 *db, int tripCode){
   for(i=0; i<db->nDb; i++){
     Btree *p = db->aDb[i].pBt;
     if( p ){
-      if( sqlite3BtreeIsInTrans(p) ){
+      if( sqlite3BtreeTxnState(p)==SQLITE_TXN_WRITE ){
         inTrans = 1;
       }
       sqlite3BtreeRollback(p, tripCode, !schemaChange);
@@ -1355,7 +1509,7 @@ void sqlite3RollbackAll(sqlite3 *db, int tripCode){
   /* Any deferred constraint violations have now been resolved. */
   db->nDeferredCons = 0;
   db->nDeferredImmCons = 0;
-  db->flags &= ~(u64)SQLITE_DeferFKs;
+  db->flags &= ~(u64)(SQLITE_DeferFKs|SQLITE_CorruptRdOnly);
 
   /* If one has been configured, invoke the rollback-hook callback */
   if( db->xRollbackCallback && (inTrans || !db->autoCommit) ){
@@ -1376,6 +1530,9 @@ const char *sqlite3ErrName(int rc){
       case SQLITE_OK:                 zName = "SQLITE_OK";                break;
       case SQLITE_ERROR:              zName = "SQLITE_ERROR";             break;
       case SQLITE_ERROR_SNAPSHOT:     zName = "SQLITE_ERROR_SNAPSHOT";    break;
+      case SQLITE_ERROR_RETRY:        zName = "SQLITE_ERROR_RETRY";       break;
+      case SQLITE_ERROR_MISSING_COLLSEQ:
+                                zName = "SQLITE_ERROR_MISSING_COLLSEQ";   break;
       case SQLITE_INTERNAL:           zName = "SQLITE_INTERNAL";          break;
       case SQLITE_PERM:               zName = "SQLITE_PERM";              break;
       case SQLITE_ABORT:              zName = "SQLITE_ABORT";             break;
@@ -1461,6 +1618,7 @@ const char *sqlite3ErrName(int rc){
       case SQLITE_NOTICE_RECOVER_WAL: zName = "SQLITE_NOTICE_RECOVER_WAL";break;
       case SQLITE_NOTICE_RECOVER_ROLLBACK:
                                 zName = "SQLITE_NOTICE_RECOVER_ROLLBACK"; break;
+      case SQLITE_NOTICE_RBU:         zName = "SQLITE_NOTICE_RBU"; break;
       case SQLITE_WARNING:            zName = "SQLITE_WARNING";           break;
       case SQLITE_WARNING_AUTOINDEX:  zName = "SQLITE_WARNING_AUTOINDEX"; break;
       case SQLITE_DONE:               zName = "SQLITE_DONE";              break;
@@ -1551,12 +1709,11 @@ const char *sqlite3ErrStr(int rc){
 */
 static int sqliteDefaultBusyCallback(
   void *ptr,               /* Database connection */
-  int count,               /* Number of times table has been busy */
-  sqlite3_file *pFile      /* The file on which the lock occurred */
+  int count                /* Number of times table has been busy */
 ){
-#if SQLITE_OS_WIN || HAVE_USLEEP
+#if SQLITE_OS_WIN || !defined(HAVE_NANOSLEEP) || HAVE_NANOSLEEP
   /* This case is for systems that have support for sleeping for fractions of
-  ** a second.  Examples:  All windows systems, unix systems with usleep() */
+  ** a second.  Examples:  All windows systems, unix systems with nanosleep() */
   static const u8 delays[] =
      { 1, 2, 5, 10, 15, 20, 25, 25,  25,  50,  50, 100 };
   static const u8 totals[] =
@@ -1566,19 +1723,6 @@ static int sqliteDefaultBusyCallback(
   int tmout = db->busyTimeout;
   int delay, prior;
 
-#ifdef SQLITE_ENABLE_SETLK_TIMEOUT
-  if( sqlite3OsFileControl(pFile,SQLITE_FCNTL_LOCK_TIMEOUT,&tmout)==SQLITE_OK ){
-    if( count ){
-      tmout = 0;
-      sqlite3OsFileControl(pFile, SQLITE_FCNTL_LOCK_TIMEOUT, &tmout);
-      return 0;
-    }else{
-      return 1;
-    }
-  }
-#else
-  UNUSED_PARAMETER(pFile);
-#endif
   assert( count>=0 );
   if( count < NDELAY ){
     delay = delays[count];
@@ -1598,7 +1742,6 @@ static int sqliteDefaultBusyCallback(
   ** must be done in increments of whole seconds */
   sqlite3 *db = (sqlite3 *)ptr;
   int tmout = ((sqlite3 *)ptr)->busyTimeout;
-  UNUSED_PARAMETER(pFile);
   if( (count+1)*1000 > tmout ){
     return 0;
   }
@@ -1616,25 +1759,16 @@ static int sqliteDefaultBusyCallback(
 ** If this routine returns non-zero, the lock is retried.  If it
 ** returns 0, the operation aborts with an SQLITE_BUSY error.
 */
-int sqlite3InvokeBusyHandler(BusyHandler *p, sqlite3_file *pFile){
+int sqlite3InvokeBusyHandler(BusyHandler *p){
   int rc;
   if( p->xBusyHandler==0 || p->nBusy<0 ) return 0;
-  if( p->bExtraFileArg ){
-    /* Add an extra parameter with the pFile pointer to the end of the
-    ** callback argument list */
-    int (*xTra)(void*,int,sqlite3_file*);
-    xTra = (int(*)(void*,int,sqlite3_file*))p->xBusyHandler;
-    rc = xTra(p->pBusyArg, p->nBusy, pFile);
-  }else{
-    /* Legacy style busy handler callback */
-    rc = p->xBusyHandler(p->pBusyArg, p->nBusy);
-  }
+  rc = p->xBusyHandler(p->pBusyArg, p->nBusy);
   if( rc==0 ){
     p->nBusy = -1;
   }else{
     p->nBusy++;
   }
-  return rc; 
+  return rc;
 }
 
 /*
@@ -1653,8 +1787,10 @@ int sqlite3_busy_handler(
   db->busyHandler.xBusyHandler = xBusy;
   db->busyHandler.pBusyArg = pArg;
   db->busyHandler.nBusy = 0;
-  db->busyHandler.bExtraFileArg = 0;
   db->busyTimeout = 0;
+#ifdef SQLITE_ENABLE_SETLK_TIMEOUT
+  db->setlkTimeout = 0;
+#endif
   sqlite3_mutex_leave(db->mutex);
   return SQLITE_OK;
 }
@@ -1666,9 +1802,9 @@ int sqlite3_busy_handler(
 ** be invoked every nOps opcodes.
 */
 void sqlite3_progress_handler(
-  sqlite3 *db, 
+  sqlite3 *db,
   int nOps,
-  int (*xProgress)(void*), 
+  int (*xProgress)(void*),
   void *pArg
 ){
 #ifdef SQLITE_ENABLE_API_ARMOR
@@ -1704,10 +1840,46 @@ int sqlite3_busy_timeout(sqlite3 *db, int ms){
     sqlite3_busy_handler(db, (int(*)(void*,int))sqliteDefaultBusyCallback,
                              (void*)db);
     db->busyTimeout = ms;
-    db->busyHandler.bExtraFileArg = 1;
+#ifdef SQLITE_ENABLE_SETLK_TIMEOUT
+    db->setlkTimeout = ms;
+#endif
   }else{
     sqlite3_busy_handler(db, 0, 0);
   }
+  return SQLITE_OK;
+}
+
+/*
+** Set the setlk timeout value.
+*/
+int sqlite3_setlk_timeout(sqlite3 *db, int ms, int flags){
+#ifdef SQLITE_ENABLE_SETLK_TIMEOUT
+  int iDb;
+  int bBOC = ((flags & SQLITE_SETLK_BLOCK_ON_CONNECT) ? 1 : 0);
+#endif
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( !sqlite3SafetyCheckOk(db) ) return SQLITE_MISUSE_BKPT;
+#endif
+  if( ms<-1 ) return SQLITE_RANGE;
+#ifdef SQLITE_ENABLE_SETLK_TIMEOUT
+  sqlite3_mutex_enter(db->mutex);
+  db->setlkTimeout = ms;
+  db->setlkFlags = flags;
+  sqlite3BtreeEnterAll(db);
+  for(iDb=0; iDb<db->nDb; iDb++){
+    Btree *pBt = db->aDb[iDb].pBt;
+    if( pBt ){
+      sqlite3_file *fd = sqlite3PagerFile(sqlite3BtreePager(pBt));
+      sqlite3OsFileControlHint(fd, SQLITE_FCNTL_BLOCK_ON_CONNECT, (void*)&bBOC);
+    }
+  }
+  sqlite3BtreeLeaveAll(db);
+  sqlite3_mutex_leave(db->mutex);
+#endif
+#if !defined(SQLITE_ENABLE_API_ARMOR) && !defined(SQLITE_ENABLE_SETLK_TIMEOUT)
+  UNUSED_PARAMETER(db);
+  UNUSED_PARAMETER(flags);
+#endif
   return SQLITE_OK;
 }
 
@@ -1716,20 +1888,37 @@ int sqlite3_busy_timeout(sqlite3 *db, int ms){
 */
 void sqlite3_interrupt(sqlite3 *db){
 #ifdef SQLITE_ENABLE_API_ARMOR
-  if( !sqlite3SafetyCheckOk(db) && (db==0 || db->magic!=SQLITE_MAGIC_ZOMBIE) ){
+  if( !sqlite3SafetyCheckOk(db)
+   && (db==0 || db->eOpenState!=SQLITE_STATE_ZOMBIE)
+  ){
     (void)SQLITE_MISUSE_BKPT;
     return;
   }
 #endif
-  db->u1.isInterrupted = 1;
+  AtomicStore(&db->u1.isInterrupted, 1);
 }
 
+/*
+** Return true or false depending on whether or not an interrupt is
+** pending on connection db.
+*/
+int sqlite3_is_interrupted(sqlite3 *db){
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( !sqlite3SafetyCheckOk(db)
+   && (db==0 || db->eOpenState!=SQLITE_STATE_ZOMBIE)
+  ){
+    (void)SQLITE_MISUSE_BKPT;
+    return 0;
+  }
+#endif
+  return AtomicLoad(&db->u1.isInterrupted)!=0;
+}
 
 /*
 ** This function is exactly the same as sqlite3_create_function(), except
 ** that it is designed to be called by internal code. The difference is
 ** that if a malloc() fails in sqlite3_create_function(), an error code
-** is returned and the mallocFailed flag cleared. 
+** is returned and the mallocFailed flag cleared.
 */
 int sqlite3CreateFunc(
   sqlite3 *db,
@@ -1745,7 +1934,6 @@ int sqlite3CreateFunc(
   FuncDestructor *pDestructor
 ){
   FuncDef *p;
-  int nName;
   int extraFlags;
 
   assert( sqlite3_mutex_held(db->mutex) );
@@ -1755,7 +1943,7 @@ int sqlite3CreateFunc(
    || ((xFinal==0)!=(xStep==0))       /* Both or neither of xFinal and xStep */
    || ((xValue==0)!=(xInverse==0))    /* Both or neither of xValue, xInverse */
    || (nArg<-1 || nArg>SQLITE_MAX_FUNCTION_ARG)
-   || (255<(nName = sqlite3Strlen30( zFunctionName)))
+   || (255<sqlite3Strlen30(zFunctionName))
   ){
     return SQLITE_MISUSE_BKPT;
   }
@@ -1763,15 +1951,16 @@ int sqlite3CreateFunc(
   assert( SQLITE_FUNC_CONSTANT==SQLITE_DETERMINISTIC );
   assert( SQLITE_FUNC_DIRECT==SQLITE_DIRECTONLY );
   extraFlags = enc &  (SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY|
-                       SQLITE_SUBTYPE|SQLITE_INNOCUOUS);
+                       SQLITE_SUBTYPE|SQLITE_INNOCUOUS|
+                       SQLITE_RESULT_SUBTYPE|SQLITE_SELFORDER1);
   enc &= (SQLITE_FUNC_ENCMASK|SQLITE_ANY);
 
   /* The SQLITE_INNOCUOUS flag is the same bit as SQLITE_FUNC_UNSAFE.  But
   ** the meaning is inverted.  So flip the bit. */
   assert( SQLITE_FUNC_UNSAFE==SQLITE_INNOCUOUS );
-  extraFlags ^= SQLITE_FUNC_UNSAFE;
+  extraFlags ^= SQLITE_FUNC_UNSAFE;  /* tag-20230109-1 */
 
-  
+ 
 #ifndef SQLITE_OMIT_UTF16
   /* If SQLITE_UTF16 is specified as the encoding type, transform this
   ** to one of SQLITE_UTF16LE or SQLITE_UTF16BE using the
@@ -1780,27 +1969,38 @@ int sqlite3CreateFunc(
   ** If SQLITE_ANY is specified, add three versions of the function
   ** to the hash table.
   */
-  if( enc==SQLITE_UTF16 ){
-    enc = SQLITE_UTF16NATIVE;
-  }else if( enc==SQLITE_ANY ){
-    int rc;
-    rc = sqlite3CreateFunc(db, zFunctionName, nArg,
-         (SQLITE_UTF8|extraFlags)^SQLITE_FUNC_UNSAFE,
-         pUserData, xSFunc, xStep, xFinal, xValue, xInverse, pDestructor);
-    if( rc==SQLITE_OK ){
+  switch( enc ){
+    case SQLITE_UTF16:
+      enc = SQLITE_UTF16NATIVE;
+      break;
+    case SQLITE_ANY: {
+      int rc;
       rc = sqlite3CreateFunc(db, zFunctionName, nArg,
-           (SQLITE_UTF16LE|extraFlags)^SQLITE_FUNC_UNSAFE,
+           (SQLITE_UTF8|extraFlags)^SQLITE_FUNC_UNSAFE, /* tag-20230109-1 */
            pUserData, xSFunc, xStep, xFinal, xValue, xInverse, pDestructor);
+      if( rc==SQLITE_OK ){
+        rc = sqlite3CreateFunc(db, zFunctionName, nArg,
+             (SQLITE_UTF16LE|extraFlags)^SQLITE_FUNC_UNSAFE, /* tag-20230109-1*/
+             pUserData, xSFunc, xStep, xFinal, xValue, xInverse, pDestructor);
+      }
+      if( rc!=SQLITE_OK ){
+        return rc;
+      }
+      enc = SQLITE_UTF16BE;
+      break;
     }
-    if( rc!=SQLITE_OK ){
-      return rc;
-    }
-    enc = SQLITE_UTF16BE;
+    case SQLITE_UTF8:
+    case SQLITE_UTF16LE:
+    case SQLITE_UTF16BE:
+      break;
+    default:
+      enc = SQLITE_UTF8;
+      break;
   }
 #else
   enc = SQLITE_UTF8;
 #endif
-  
+ 
   /* Check if an existing function is being overridden or deleted. If so,
   ** and there are active VMs, then return SQLITE_BUSY. If a function
   ** is being overridden/deleted but there are no active VMs, allow the
@@ -1809,13 +2009,17 @@ int sqlite3CreateFunc(
   p = sqlite3FindFunction(db, zFunctionName, nArg, (u8)enc, 0);
   if( p && (p->funcFlags & SQLITE_FUNC_ENCMASK)==(u32)enc && p->nArg==nArg ){
     if( db->nVdbeActive ){
-      sqlite3ErrorWithMsg(db, SQLITE_BUSY, 
+      sqlite3ErrorWithMsg(db, SQLITE_BUSY,
         "unable to delete/modify user-function due to active statements");
       assert( !db->mallocFailed );
       return SQLITE_BUSY;
     }else{
       sqlite3ExpirePreparedStatements(db, 0);
     }
+  }else if( xSFunc==0 && xFinal==0 ){
+    /* Trying to delete a function that does not exist.  This is a no-op.
+    ** https://sqlite.org/forum/forumpost/726219164b */
+    return SQLITE_OK;
   }
 
   p = sqlite3FindFunction(db, zFunctionName, nArg, (u8)enc, 1);
@@ -1884,11 +2088,11 @@ static int createFunctionApi(
     pArg->xDestroy = xDestroy;
     pArg->pUserData = p;
   }
-  rc = sqlite3CreateFunc(db, zFunc, nArg, enc, p, 
+  rc = sqlite3CreateFunc(db, zFunc, nArg, enc, p,
       xSFunc, xStep, xFinal, xValue, xInverse, pArg
   );
   if( pArg && pArg->nRef==0 ){
-    assert( rc!=SQLITE_OK );
+    assert( rc!=SQLITE_OK || (xStep==0 && xFinal==0) );
     xDestroy(p);
     sqlite3_free(pArg);
   }
@@ -2001,7 +2205,7 @@ static void sqlite3InvalidFunction(
 **
 ** If the function already exists as a regular global function, then
 ** this routine is a no-op.  If the function does not exist, then create
-** a new one that always throws a run-time error.  
+** a new one that always throws a run-time error. 
 **
 ** When virtual tables intend to provide an overloaded function, they
 ** should call this routine to make sure the global function exists.
@@ -2025,7 +2229,7 @@ int sqlite3_overload_function(
   rc = sqlite3FindFunction(db, zName, nArg, SQLITE_UTF8, 0)!=0;
   sqlite3_mutex_leave(db->mutex);
   if( rc ) return SQLITE_OK;
-  zCopy = sqlite3_mprintf(zName);
+  zCopy = sqlite3_mprintf("%s", zName);
   if( zCopy==0 ) return SQLITE_NOMEM;
   return sqlite3_create_function_v2(db, zName, nArg, SQLITE_UTF8,
                            zCopy, sqlite3InvalidFunction, 0, 0, sqlite3_free);
@@ -2034,7 +2238,7 @@ int sqlite3_overload_function(
 #ifndef SQLITE_OMIT_TRACE
 /*
 ** Register a trace function.  The pArg from the previously registered trace
-** is returned.  
+** is returned. 
 **
 ** A NULL trace function means that no tracing is executes.  A non-NULL
 ** trace is a pointer to a function that is invoked at the start of each
@@ -2053,7 +2257,7 @@ void *sqlite3_trace(sqlite3 *db, void(*xTrace)(void*,const char*), void *pArg){
   sqlite3_mutex_enter(db->mutex);
   pOld = db->pTraceArg;
   db->mTrace = xTrace ? SQLITE_TRACE_LEGACY : 0;
-  db->xTrace = (int(*)(u32,void*,void*,void*))xTrace;
+  db->trace.xLegacy = xTrace;
   db->pTraceArg = pArg;
   sqlite3_mutex_leave(db->mutex);
   return pOld;
@@ -2077,7 +2281,7 @@ int sqlite3_trace_v2(
   if( mTrace==0 ) xTrace = 0;
   if( xTrace==0 ) mTrace = 0;
   db->mTrace = mTrace;
-  db->xTrace = xTrace;
+  db->trace.xV2 = xTrace;
   db->pTraceArg = pArg;
   sqlite3_mutex_leave(db->mutex);
   return SQLITE_OK;
@@ -2085,8 +2289,8 @@ int sqlite3_trace_v2(
 
 #ifndef SQLITE_OMIT_DEPRECATED
 /*
-** Register a profile function.  The pArg from the previously registered 
-** profile function is returned.  
+** Register a profile function.  The pArg from the previously registered
+** profile function is returned. 
 **
 ** A NULL profile function means that no profiling is executes.  A non-NULL
 ** profile is a pointer to a function that is invoked at the conclusion of
@@ -2205,6 +2409,12 @@ void *sqlite3_preupdate_hook(
   void *pArg                /* First callback argument */
 ){
   void *pRet;
+
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( db==0 ){
+    return 0;
+  }
+#endif
   sqlite3_mutex_enter(db->mutex);
   pRet = db->pPreUpdateArg;
   db->xPreUpdateCallback = xCallback;
@@ -2214,13 +2424,41 @@ void *sqlite3_preupdate_hook(
 }
 #endif /* SQLITE_ENABLE_PREUPDATE_HOOK */
 
+/*
+** Register a function to be invoked prior to each autovacuum that
+** determines the number of pages to vacuum.
+*/
+int sqlite3_autovacuum_pages(
+  sqlite3 *db,                 /* Attach the hook to this database */
+  unsigned int (*xCallback)(void*,const char*,u32,u32,u32),
+  void *pArg,                  /* Argument to the function */
+  void (*xDestructor)(void*)   /* Destructor for pArg */
+){
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( !sqlite3SafetyCheckOk(db) ){
+    if( xDestructor ) xDestructor(pArg);
+    return SQLITE_MISUSE_BKPT;
+  }
+#endif
+  sqlite3_mutex_enter(db->mutex);
+  if( db->xAutovacDestr ){
+    db->xAutovacDestr(db->pAutovacPagesArg);
+  }
+  db->xAutovacPages = xCallback;
+  db->pAutovacPagesArg = pArg;
+  db->xAutovacDestr = xDestructor;
+  sqlite3_mutex_leave(db->mutex);
+  return SQLITE_OK;
+}
+
+
 #ifndef SQLITE_OMIT_WAL
 /*
 ** The sqlite3_wal_hook() callback registered by sqlite3_wal_autocheckpoint().
 ** Invoke sqlite3_wal_checkpoint if the number of frames in the log file
 ** is greater than sqlite3.pWalArg cast to an integer (the value configured by
 ** wal_autocheckpoint()).
-*/ 
+*/
 int sqlite3WalDefaultHook(
   void *pClientData,     /* Argument */
   sqlite3 *db,           /* Connection */
@@ -2288,6 +2526,9 @@ void *sqlite3_wal_hook(
   sqlite3_mutex_leave(db->mutex);
   return pRet;
 #else
+  UNUSED_PARAMETER(db);
+  UNUSED_PARAMETER(xCallback);
+  UNUSED_PARAMETER(pArg);
   return 0;
 #endif
 }
@@ -2303,10 +2544,15 @@ int sqlite3_wal_checkpoint_v2(
   int *pnCkpt                     /* OUT: Total number of frames checkpointed */
 ){
 #ifdef SQLITE_OMIT_WAL
+  UNUSED_PARAMETER(db);
+  UNUSED_PARAMETER(zDb);
+  UNUSED_PARAMETER(eMode);
+  UNUSED_PARAMETER(pnLog);
+  UNUSED_PARAMETER(pnCkpt);
   return SQLITE_OK;
 #else
   int rc;                         /* Return code */
-  int iDb = SQLITE_MAX_ATTACHED;  /* sqlite3.aDb[] index of db to checkpoint */
+  int iDb;                        /* Schema to checkpoint */
 
 #ifdef SQLITE_ENABLE_API_ARMOR
   if( !sqlite3SafetyCheckOk(db) ) return SQLITE_MISUSE_BKPT;
@@ -2316,19 +2562,22 @@ int sqlite3_wal_checkpoint_v2(
   if( pnLog ) *pnLog = -1;
   if( pnCkpt ) *pnCkpt = -1;
 
+  assert( SQLITE_CHECKPOINT_NOOP==-1 );
   assert( SQLITE_CHECKPOINT_PASSIVE==0 );
   assert( SQLITE_CHECKPOINT_FULL==1 );
   assert( SQLITE_CHECKPOINT_RESTART==2 );
   assert( SQLITE_CHECKPOINT_TRUNCATE==3 );
-  if( eMode<SQLITE_CHECKPOINT_PASSIVE || eMode>SQLITE_CHECKPOINT_TRUNCATE ){
+  if( eMode<SQLITE_CHECKPOINT_NOOP || eMode>SQLITE_CHECKPOINT_TRUNCATE ){
     /* EVIDENCE-OF: R-03996-12088 The M parameter must be a valid checkpoint
     ** mode: */
-    return SQLITE_MISUSE;
+    return SQLITE_MISUSE_BKPT;
   }
 
   sqlite3_mutex_enter(db->mutex);
   if( zDb && zDb[0] ){
     iDb = sqlite3FindDbName(db, zDb);
+  }else{
+    iDb = SQLITE_MAX_DB;   /* This means process all schemas */
   }
   if( iDb<0 ){
     rc = SQLITE_ERROR;
@@ -2343,7 +2592,7 @@ int sqlite3_wal_checkpoint_v2(
   /* If there are no active statements, clear the interrupt flag at this
   ** point.  */
   if( db->nVdbeActive==0 ){
-    db->u1.isInterrupted = 0;
+    AtomicStore(&db->u1.isInterrupted, 0);
   }
 
   sqlite3_mutex_leave(db->mutex);
@@ -2354,7 +2603,7 @@ int sqlite3_wal_checkpoint_v2(
 
 /*
 ** Checkpoint database zDb. If zDb is NULL, or if the buffer zDb points
-** to contains a zero-length string, all attached databases are 
+** to contains a zero-length string, all attached databases are
 ** checkpointed.
 */
 int sqlite3_wal_checkpoint(sqlite3 *db, const char *zDb){
@@ -2368,16 +2617,16 @@ int sqlite3_wal_checkpoint(sqlite3 *db, const char *zDb){
 ** Run a checkpoint on database iDb. This is a no-op if database iDb is
 ** not currently open in WAL mode.
 **
-** If a transaction is open on the database being checkpointed, this 
-** function returns SQLITE_LOCKED and a checkpoint is not attempted. If 
-** an error occurs while running the checkpoint, an SQLite error code is 
+** If a transaction is open on the database being checkpointed, this
+** function returns SQLITE_LOCKED and a checkpoint is not attempted. If
+** an error occurs while running the checkpoint, an SQLite error code is
 ** returned (i.e. SQLITE_IOERR). Otherwise, SQLITE_OK.
 **
 ** The mutex on database handle db should be held by the caller. The mutex
 ** associated with the specific b-tree being checkpointed is taken by
 ** this function while the checkpoint is running.
 **
-** If iDb is passed SQLITE_MAX_ATTACHED, then all attached databases are
+** If iDb is passed SQLITE_MAX_DB then all attached databases are
 ** checkpointed. If an error is encountered it is returned immediately -
 ** no attempt is made to checkpoint any remaining databases.
 **
@@ -2392,9 +2641,11 @@ int sqlite3Checkpoint(sqlite3 *db, int iDb, int eMode, int *pnLog, int *pnCkpt){
   assert( sqlite3_mutex_held(db->mutex) );
   assert( !pnLog || *pnLog==-1 );
   assert( !pnCkpt || *pnCkpt==-1 );
+  testcase( iDb==SQLITE_MAX_ATTACHED ); /* See forum post a006d86f72 */
+  testcase( iDb==SQLITE_MAX_DB );
 
   for(i=0; i<db->nDb && rc==SQLITE_OK; i++){
-    if( i==iDb || iDb==SQLITE_MAX_ATTACHED ){
+    if( i==iDb || iDb==SQLITE_MAX_DB ){
       rc = sqlite3BtreeCheckpoint(db->aDb[i].pBt, eMode, pnLog, pnCkpt);
       pnLog = 0;
       pnCkpt = 0;
@@ -2472,6 +2723,42 @@ const char *sqlite3_errmsg(sqlite3 *db){
   return z;
 }
 
+/*
+** Set the error code and error message associated with the database handle.
+**
+** This routine is intended to be called by outside extensions (ex: the
+** Session extension). Internal logic should invoke sqlite3Error() or
+** sqlite3ErrorWithMsg() directly.
+*/
+int sqlite3_set_errmsg(sqlite3 *db, int errcode, const char *zMsg){
+  int rc = SQLITE_OK;
+  if( !sqlite3SafetyCheckOk(db) ){
+    return SQLITE_MISUSE_BKPT;
+  }
+  sqlite3_mutex_enter(db->mutex);
+  if( zMsg ){
+    sqlite3ErrorWithMsg(db, errcode, "%s", zMsg);
+  }else{
+    sqlite3Error(db, errcode);
+  }
+  rc = sqlite3ApiExit(db, rc);
+  sqlite3_mutex_leave(db->mutex);
+  return rc;
+}
+
+/*
+** Return the byte offset of the most recent error
+*/
+int sqlite3_error_offset(sqlite3 *db){
+  int iOffset = -1;
+  if( db && sqlite3SafetyCheckSickOrOk(db) && db->errCode ){
+    sqlite3_mutex_enter(db->mutex);
+    iOffset = db->errByteOffset;
+    sqlite3_mutex_leave(db->mutex);
+  }
+  return iOffset;
+}
+
 #ifndef SQLITE_OMIT_UTF16
 /*
 ** Return UTF-16 encoded English language explanation of the most recent
@@ -2539,7 +2826,7 @@ int sqlite3_extended_errcode(sqlite3 *db){
 }
 int sqlite3_system_errno(sqlite3 *db){
   return db ? db->iSysErrno : 0;
-}  
+} 
 
 /*
 ** Return a string that describes the kind of error specified in the
@@ -2556,7 +2843,7 @@ const char *sqlite3_errstr(int rc){
 */
 static int createCollation(
   sqlite3* db,
-  const char *zName, 
+  const char *zName,
   u8 enc,
   void* pCtx,
   int(*xCompare)(void*,int,const void*,int,const void*),
@@ -2564,7 +2851,7 @@ static int createCollation(
 ){
   CollSeq *pColl;
   int enc2;
-  
+ 
   assert( sqlite3_mutex_held(db->mutex) );
 
   /* If SQLITE_UTF16 is specified as the encoding type, transform this
@@ -2581,14 +2868,14 @@ static int createCollation(
     return SQLITE_MISUSE_BKPT;
   }
 
-  /* Check if this call is removing or replacing an existing collation 
+  /* Check if this call is removing or replacing an existing collation
   ** sequence. If so, and there are active VMs, return busy. If there
   ** are no active VMs, invalidate any pre-compiled statements.
   */
   pColl = sqlite3FindCollSeq(db, (u8)enc2, zName, 0);
   if( pColl && pColl->xCmp ){
     if( db->nVdbeActive ){
-      sqlite3ErrorWithMsg(db, SQLITE_BUSY, 
+      sqlite3ErrorWithMsg(db, SQLITE_BUSY,
         "unable to delete/modify collation sequence due to active statements");
       return SQLITE_BUSY;
     }
@@ -2599,7 +2886,7 @@ static int createCollation(
     ** then any copies made by synthCollSeq() need to be invalidated.
     ** Also, collation destructor - CollSeq.xDel() - function may need
     ** to be called.
-    */ 
+    */
     if( (pColl->enc & ~SQLITE_UTF16_ALIGNED)==enc2 ){
       CollSeq *aColl = sqlite3HashFind(&db->aCollSeq, zName);
       int j;
@@ -2644,6 +2931,7 @@ static const int aHardLimit[] = {
   SQLITE_MAX_VARIABLE_NUMBER,      /* IMP: R-38091-32352 */
   SQLITE_MAX_TRIGGER_DEPTH,
   SQLITE_MAX_WORKER_THREADS,
+  SQLITE_MAX_PARSER_DEPTH,
 };
 
 /*
@@ -2658,14 +2946,17 @@ static const int aHardLimit[] = {
 #if SQLITE_MAX_SQL_LENGTH>SQLITE_MAX_LENGTH
 # error SQLITE_MAX_SQL_LENGTH must not be greater than SQLITE_MAX_LENGTH
 #endif
+#if SQLITE_MAX_SQL_LENGTH>2147482624     /* 1024 less than 2^31 */
+# error SQLITE_MAX_SQL_LENGTH must not be greater than 2147482624
+#endif
 #if SQLITE_MAX_COMPOUND_SELECT<2
 # error SQLITE_MAX_COMPOUND_SELECT must be at least 2
 #endif
 #if SQLITE_MAX_VDBE_OP<40
 # error SQLITE_MAX_VDBE_OP must be at least 40
 #endif
-#if SQLITE_MAX_FUNCTION_ARG<0 || SQLITE_MAX_FUNCTION_ARG>127
-# error SQLITE_MAX_FUNCTION_ARG must be between 0 and 127
+#if SQLITE_MAX_FUNCTION_ARG<0 || SQLITE_MAX_FUNCTION_ARG>32767
+# error SQLITE_MAX_FUNCTION_ARG must be between 0 and 32767
 #endif
 #if SQLITE_MAX_ATTACHED<0 || SQLITE_MAX_ATTACHED>125
 # error SQLITE_MAX_ATTACHED must be between 0 and 125
@@ -2713,6 +3004,7 @@ int sqlite3_limit(sqlite3 *db, int limitId, int newLimit){
   assert( aHardLimit[SQLITE_LIMIT_SQL_LENGTH]==SQLITE_MAX_SQL_LENGTH );
   assert( aHardLimit[SQLITE_LIMIT_COLUMN]==SQLITE_MAX_COLUMN );
   assert( aHardLimit[SQLITE_LIMIT_EXPR_DEPTH]==SQLITE_MAX_EXPR_DEPTH );
+  assert( aHardLimit[SQLITE_LIMIT_PARSER_DEPTH]==SQLITE_MAX_PARSER_DEPTH );
   assert( aHardLimit[SQLITE_LIMIT_COMPOUND_SELECT]==SQLITE_MAX_COMPOUND_SELECT);
   assert( aHardLimit[SQLITE_LIMIT_VDBE_OP]==SQLITE_MAX_VDBE_OP );
   assert( aHardLimit[SQLITE_LIMIT_FUNCTION_ARG]==SQLITE_MAX_FUNCTION_ARG );
@@ -2722,7 +3014,7 @@ int sqlite3_limit(sqlite3 *db, int limitId, int newLimit){
   assert( aHardLimit[SQLITE_LIMIT_VARIABLE_NUMBER]==SQLITE_MAX_VARIABLE_NUMBER);
   assert( aHardLimit[SQLITE_LIMIT_TRIGGER_DEPTH]==SQLITE_MAX_TRIGGER_DEPTH );
   assert( aHardLimit[SQLITE_LIMIT_WORKER_THREADS]==SQLITE_MAX_WORKER_THREADS );
-  assert( SQLITE_LIMIT_WORKER_THREADS==(SQLITE_N_LIMIT-1) );
+  assert( SQLITE_LIMIT_PARSER_DEPTH==(SQLITE_N_LIMIT-1) );
 
 
   if( limitId<0 || limitId>=SQLITE_N_LIMIT ){
@@ -2732,6 +3024,8 @@ int sqlite3_limit(sqlite3 *db, int limitId, int newLimit){
   if( newLimit>=0 ){                   /* IMP: R-52476-28732 */
     if( newLimit>aHardLimit[limitId] ){
       newLimit = aHardLimit[limitId];  /* IMP: R-51463-25634 */
+    }else if( newLimit<SQLITE_MIN_LENGTH && limitId==SQLITE_LIMIT_LENGTH ){
+      newLimit = SQLITE_MIN_LENGTH;
     }
     db->aLimit[limitId] = newLimit;
   }
@@ -2748,7 +3042,7 @@ int sqlite3_limit(sqlite3 *db, int limitId, int newLimit){
 ** query parameter. The second argument contains the URI (or non-URI filename)
 ** itself. When this function is called the *pFlags variable should contain
 ** the default flags to open the database handle with. The value stored in
-** *pFlags may be updated before returning if the URI filename contains 
+** *pFlags may be updated before returning if the URI filename contains
 ** "cache=xxx" or "mode=xxx" query parameters.
 **
 ** If successful, SQLITE_OK is returned. In this case *ppVfs is set to point to
@@ -2760,7 +3054,7 @@ int sqlite3_limit(sqlite3 *db, int limitId, int newLimit){
 ** the value returned in *pzFile to avoid a memory leak.
 **
 ** If an error occurs, then an SQLite error code is returned and *pzErrMsg
-** may be set to point to a buffer containing an English language error 
+** may be set to point to a buffer containing an English language error
 ** message. It is the responsibility of the caller to eventually release
 ** this buffer by calling sqlite3_free().
 */
@@ -2768,7 +3062,7 @@ int sqlite3ParseUri(
   const char *zDefaultVfs,        /* VFS to use if no "vfs=xxx" query option */
   const char *zUri,               /* Nul-terminated URI to parse */
   unsigned int *pFlags,           /* IN/OUT: SQLITE_OPEN_XXX flags */
-  sqlite3_vfs **ppVfs,            /* OUT: VFS to use */ 
+  sqlite3_vfs **ppVfs,            /* OUT: VFS to use */
   char **pzFile,                  /* OUT: Filename component of URI */
   char **pzErrMsg                 /* OUT: Error message (if rc!=SQLITE_OK) */
 ){
@@ -2781,9 +3075,9 @@ int sqlite3ParseUri(
 
   assert( *pzErrMsg==0 );
 
-  if( ((flags & SQLITE_OPEN_URI)             /* IMP: R-48725-32206 */
-            || sqlite3GlobalConfig.bOpenUri) /* IMP: R-51689-46548 */
-   && nUri>=5 && memcmp(zUri, "file:", 5)==0 /* IMP: R-57884-37496 */
+  if( ((flags & SQLITE_OPEN_URI)                     /* IMP: R-48725-32206 */
+       || AtomicLoad(&sqlite3GlobalConfig.bOpenUri)) /* IMP: R-51689-46548 */
+   && nUri>=5 && memcmp(zUri, "file:", 5)==0         /* IMP: R-57884-37496 */
   ){
     char *zOpt;
     int eState;                   /* Parser state when parsing URI */
@@ -2791,7 +3085,7 @@ int sqlite3ParseUri(
     int iOut = 0;                 /* Output character index */
     u64 nByte = nUri+8;           /* Bytes of space to allocate */
 
-    /* Make sure the SQLITE_OPEN_URI flag is set to indicate to the VFS xOpen 
+    /* Make sure the SQLITE_OPEN_URI flag is set to indicate to the VFS xOpen
     ** method that there may be extra parameters following the file-name.  */
     flags |= SQLITE_OPEN_URI;
 
@@ -2809,7 +3103,7 @@ int sqlite3ParseUri(
       /* The following condition causes URIs with five leading / characters
       ** like file://///host/path to be converted into UNCs like //host/path.
       ** The correct URI for that UNC has only two or four leading / characters
-      ** file://host/path or file:////host/path.  But 5 leading slashes is a 
+      ** file://host/path or file:////host/path.  But 5 leading slashes is a
       ** common error, we are told, so we handle it as a special case. */
       if( strncmp(zUri+7, "///", 3)==0 ){ iIn++; }
     }else if( strncmp(zUri+5, "//localhost/", 12)==0 ){
@@ -2821,7 +3115,7 @@ int sqlite3ParseUri(
       iIn = 7;
       while( zUri[iIn] && zUri[iIn]!='/' ) iIn++;
       if( iIn!=7 && (iIn!=16 || memcmp("localhost", &zUri[7], 9)) ){
-        *pzErrMsg = sqlite3_mprintf("invalid uri authority: %.*s", 
+        *pzErrMsg = sqlite3_mprintf("invalid uri authority: %.*s",
             iIn-7, &zUri[7]);
         rc = SQLITE_ERROR;
         goto parse_uri_out;
@@ -2829,8 +3123,8 @@ int sqlite3ParseUri(
     }
 #endif
 
-    /* Copy the filename and any query parameters into the zFile buffer. 
-    ** Decode %HH escape codes along the way. 
+    /* Copy the filename and any query parameters into the zFile buffer.
+    ** Decode %HH escape codes along the way.
     **
     ** Within this loop, variable eState may be set to 0, 1 or 2, depending
     ** on the parsing context. As follows:
@@ -2842,9 +3136,9 @@ int sqlite3ParseUri(
     eState = 0;
     while( (c = zUri[iIn])!=0 && c!='#' ){
       iIn++;
-      if( c=='%' 
-       && sqlite3Isxdigit(zUri[iIn]) 
-       && sqlite3Isxdigit(zUri[iIn+1]) 
+      if( c=='%'
+       && sqlite3Isxdigit(zUri[iIn])
+       && sqlite3Isxdigit(zUri[iIn+1])
       ){
         int octet = (sqlite3HexToInt(zUri[iIn++]) << 4);
         octet += sqlite3HexToInt(zUri[iIn++]);
@@ -2856,7 +3150,7 @@ int sqlite3ParseUri(
           ** case we ignore all text in the remainder of the path, name or
           ** value currently being parsed. So ignore the current character
           ** and skip to the next "?", "=" or "&", as appropriate. */
-          while( (c = zUri[iIn])!=0 && c!='#' 
+          while( (c = zUri[iIn])!=0 && c!='#'
               && (eState!=0 || c!='?')
               && (eState!=1 || (c!='=' && c!='&'))
               && (eState!=2 || c!='&')
@@ -2893,7 +3187,7 @@ int sqlite3ParseUri(
     if( eState==1 ) zFile[iOut++] = '\0';
     memset(zFile+iOut, 0, 4); /* end-of-options + empty journal filenames */
 
-    /* Check if there were any options specified that should be interpreted 
+    /* Check if there were any options specified that should be interpreted
     ** here. Options that are interpreted here include "vfs" and those that
     ** correspond to flags that may be passed to the sqlite3_open_v2()
     ** method. */
@@ -2929,7 +3223,7 @@ int sqlite3ParseUri(
         if( nOpt==4 && memcmp("mode", zOpt, 4)==0 ){
           static struct OpenMode aOpenMode[] = {
             { "ro",  SQLITE_OPEN_READONLY },
-            { "rw",  SQLITE_OPEN_READWRITE }, 
+            { "rw",  SQLITE_OPEN_READWRITE },
             { "rwc", SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE },
             { "memory", SQLITE_OPEN_MEMORY },
             { 0, 0 }
@@ -3003,7 +3297,7 @@ int sqlite3ParseUri(
 */
 static const char *uriParameter(const char *zFilename, const char *zParam){
   zFilename += sqlite3Strlen30(zFilename) + 1;
-  while( zFilename[0] ){
+  while( ALWAYS(zFilename!=0) && zFilename[0] ){
     int x = strcmp(zFilename, zParam);
     zFilename += sqlite3Strlen30(zFilename) + 1;
     if( x==0 ) return zFilename;
@@ -3016,7 +3310,7 @@ static const char *uriParameter(const char *zFilename, const char *zParam){
 
 /*
 ** This routine does the work of opening a database on behalf of
-** sqlite3_open() and sqlite3_open16(). The database filename "zFilename"  
+** sqlite3_open() and sqlite3_open16(). The database filename "zFilename" 
 ** is UTF-8 encoded.
 */
 static int openDatabase(
@@ -3030,6 +3324,7 @@ static int openDatabase(
   int isThreadsafe;               /* True for threadsafe connections */
   char *zOpen = 0;                /* Filename argument to pass to BtreeOpen() */
   char *zErrMsg = 0;              /* Error message from sqlite3ParseUri() */
+  int i;                          /* Loop counter */
 
 #ifdef SQLITE_ENABLE_API_ARMOR
   if( ppDb==0 ) return SQLITE_MISUSE_BKPT;
@@ -3062,18 +3357,18 @@ static int openDatabase(
   ** dealt with in the previous code block.  Besides these, the only
   ** valid input flags for sqlite3_open_v2() are SQLITE_OPEN_READONLY,
   ** SQLITE_OPEN_READWRITE, SQLITE_OPEN_CREATE, SQLITE_OPEN_SHAREDCACHE,
-  ** SQLITE_OPEN_PRIVATECACHE, and some reserved bits.  Silently mask
-  ** off all other flags.
+  ** SQLITE_OPEN_PRIVATECACHE, SQLITE_OPEN_EXRESCODE, and some reserved
+  ** bits.  Silently mask off all other flags.
   */
   flags &=  ~( SQLITE_OPEN_DELETEONCLOSE |
                SQLITE_OPEN_EXCLUSIVE |
                SQLITE_OPEN_MAIN_DB |
-               SQLITE_OPEN_TEMP_DB | 
-               SQLITE_OPEN_TRANSIENT_DB | 
-               SQLITE_OPEN_MAIN_JOURNAL | 
-               SQLITE_OPEN_TEMP_JOURNAL | 
-               SQLITE_OPEN_SUBJOURNAL | 
-               SQLITE_OPEN_MASTER_JOURNAL |
+               SQLITE_OPEN_TEMP_DB |
+               SQLITE_OPEN_TRANSIENT_DB |
+               SQLITE_OPEN_MAIN_JOURNAL |
+               SQLITE_OPEN_TEMP_JOURNAL |
+               SQLITE_OPEN_SUBJOURNAL |
+               SQLITE_OPEN_SUPER_JOURNAL |
                SQLITE_OPEN_NOMUTEX |
                SQLITE_OPEN_FULLMUTEX |
                SQLITE_OPEN_WAL
@@ -3082,7 +3377,7 @@ static int openDatabase(
   /* Allocate the sqlite data structure */
   db = sqlite3MallocZero( sizeof(sqlite3) );
   if( db==0 ) goto opendb_out;
-  if( isThreadsafe 
+  if( isThreadsafe
 #ifdef SQLITE_ENABLE_MULTITHREADED_CHECKS
    || sqlite3GlobalConfig.bCoreMutex
 #endif
@@ -3098,9 +3393,9 @@ static int openDatabase(
     }
   }
   sqlite3_mutex_enter(db->mutex);
-  db->errMask = 0xff;
+  db->errMask = (flags & SQLITE_OPEN_EXRESCODE)!=0 ? 0xffffffff : 0xff;
   db->nDb = 2;
-  db->magic = SQLITE_MAGIC_BUSY;
+  db->eOpenState = SQLITE_STATE_BUSY;
   db->aDb = db->aDbStatic;
   db->lookaside.bDisable = 1;
   db->lookaside.sz = 0;
@@ -3112,11 +3407,22 @@ static int openDatabase(
   db->nextAutovac = -1;
   db->szMmap = sqlite3GlobalConfig.szMmap;
   db->nextPagesize = 0;
+  db->init.azInit = sqlite3StdType; /* Any array of string ptrs will do */
+#ifdef SQLITE_ENABLE_SORTER_MMAP
+  /* Beginning with version 3.37.0, using the VFS xFetch() API to memory-map
+  ** the temporary files used to do external sorts (see code in vdbesort.c)
+  ** is disabled. It can still be used either by defining
+  ** SQLITE_ENABLE_SORTER_MMAP at compile time or by using the
+  ** SQLITE_TESTCTRL_SORTER_MMAP test-control at runtime. */
   db->nMaxSorterMmap = 0x7FFFFFFF;
+#endif
   db->flags |= SQLITE_ShortColNames
                  | SQLITE_EnableTrigger
                  | SQLITE_EnableView
                  | SQLITE_CacheSpill
+                 | SQLITE_AttachCreate
+                 | SQLITE_AttachWrite
+                 | SQLITE_Comments
 #if !defined(SQLITE_TRUSTED_SCHEMA) || SQLITE_TRUSTED_SCHEMA+0!=0
                  | SQLITE_TrustedSchema
 #endif
@@ -3125,14 +3431,14 @@ static int openDatabase(
 **
 **    SQLITE_DQS     SQLITE_DBCONFIG_DQS_DDL    SQLITE_DBCONFIG_DQS_DML
 **    ----------     -----------------------    -----------------------
-**     undefined               on                          on   
+**     undefined               on                          on
 **         3                   on                          on
 **         2                   on                         off
 **         1                  off                          on
 **         0                  off                         off
 **
 ** Legacy behavior is 3 (double-quoted string literals are allowed anywhere)
-** and so that is the default.  But developers are encouranged to use
+** and so that is the default.  But developers are encouraged to use
 ** -DSQLITE_DQS=0 (best) or -DSQLITE_DQS=1 (second choice) if possible.
 */
 #if !defined(SQLITE_DQS)
@@ -3178,6 +3484,12 @@ static int openDatabase(
 #if defined(SQLITE_DEFAULT_DEFENSIVE)
                  | SQLITE_Defensive
 #endif
+#if defined(SQLITE_DEFAULT_LEGACY_ALTER_TABLE)
+                 | SQLITE_LegacyAlter
+#endif
+#if defined(SQLITE_ENABLE_STMT_SCANSTATUS)
+                 | SQLITE_StmtScanStatus
+#endif
       ;
   sqlite3HashInit(&db->aCollSeq);
 #ifndef SQLITE_OMIT_VIRTUALTABLE
@@ -3200,9 +3512,22 @@ static int openDatabase(
     goto opendb_out;
   }
 
+#if SQLITE_OS_UNIX && defined(SQLITE_OS_KV_OPTIONAL)
+  /* Process magic filenames ":localStorage:" and ":sessionStorage:" */
+  if( zFilename && zFilename[0]==':' ){
+    if( strcmp(zFilename, ":localStorage:")==0 ){
+      zFilename = "file:local?vfs=kvvfs";
+      flags |= SQLITE_OPEN_URI;
+    }else if( strcmp(zFilename, ":sessionStorage:")==0 ){
+      zFilename = "file:session?vfs=kvvfs";
+      flags |= SQLITE_OPEN_URI;
+    }
+  }
+#endif /* SQLITE_OS_UNIX && defined(SQLITE_OS_KV_OPTIONAL) */
+
   /* Parse the filename/URI argument
   **
-  ** Only allow sensible combinations of bits in the flags argument.  
+  ** Only allow sensible combinations of bits in the flags argument. 
   ** Throw an error if any non-sense combination is used.  If we
   ** do not block illegal combinations here, it could trigger
   ** assert() statements in deeper layers.  Sensible combinations
@@ -3220,8 +3545,9 @@ static int openDatabase(
   testcase( (1<<(flags&7))==0x04 ); /* READWRITE */
   testcase( (1<<(flags&7))==0x40 ); /* READWRITE | CREATE */
   if( ((1<<(flags&7)) & 0x46)==0 ){
-    rc = SQLITE_MISUSE_BKPT;  /* IMP: R-65497-44594 */
+    rc = SQLITE_MISUSE_BKPT;  /* IMP: R-18321-05872 */
   }else{
+    if( zFilename==0 ) zFilename = ":memory:";
     rc = sqlite3ParseUri(zVfs, zFilename, &flags, &db->pVfs, &zOpen, &zErrMsg);
   }
   if( rc!=SQLITE_OK ){
@@ -3230,6 +3556,12 @@ static int openDatabase(
     sqlite3_free(zErrMsg);
     goto opendb_out;
   }
+  assert( db->pVfs!=0 );
+#if SQLITE_OS_KV || defined(SQLITE_OS_KV_OPTIONAL)
+  if( sqlite3_stricmp(db->pVfs->zName, "kvvfs")==0 ){
+    db->temp_store = 2;
+  }
+#endif
 
   /* Open the backend database driver */
   rc = sqlite3BtreeOpen(db->pVfs, zOpen, db, &db->aDb[0].pBt, 0,
@@ -3250,14 +3582,14 @@ static int openDatabase(
   db->aDb[1].pSchema = sqlite3SchemaGet(db, 0);
 
   /* The default safety_level for the main database is FULL; for the temp
-  ** database it is OFF. This matches the pager layer defaults.  
+  ** database it is OFF. This matches the pager layer defaults. 
   */
   db->aDb[0].zDbSName = "main";
   db->aDb[0].safety_level = SQLITE_DEFAULT_SYNCHRONOUS+1;
   db->aDb[1].zDbSName = "temp";
   db->aDb[1].safety_level = PAGER_SYNCHRONOUS_OFF;
 
-  db->magic = SQLITE_MAGIC_OPEN;
+  db->eOpenState = SQLITE_STATE_OPEN;
   if( db->mallocFailed ){
     goto opendb_out;
   }
@@ -3270,14 +3602,11 @@ static int openDatabase(
   sqlite3RegisterPerConnectionBuiltinFunctions(db);
   rc = sqlite3_errcode(db);
 
-#ifdef SQLITE_ENABLE_FTS5
-  /* Register any built-in FTS5 module before loading the automatic
-  ** extensions. This allows automatic extensions to register FTS5 
-  ** tokenizers and auxiliary functions.  */
-  if( !db->mallocFailed && rc==SQLITE_OK ){
-    rc = sqlite3Fts5Init(db);
+
+  /* Load compiled-in extensions */
+  for(i=0; rc==SQLITE_OK && i<ArraySize(sqlite3BuiltinExtensions); i++){
+    rc = sqlite3BuiltinExtensions[i](db);
   }
-#endif
 
   /* Load automatic extensions - extensions that have been registered
   ** using the sqlite3_automatic_extension() API.
@@ -3290,65 +3619,9 @@ static int openDatabase(
     }
   }
 
-#ifdef SQLITE_ENABLE_FTS1
-  if( !db->mallocFailed ){
-    extern int sqlite3Fts1Init(sqlite3*);
-    rc = sqlite3Fts1Init(db);
-  }
-#endif
-
-#ifdef SQLITE_ENABLE_FTS2
-  if( !db->mallocFailed && rc==SQLITE_OK ){
-    extern int sqlite3Fts2Init(sqlite3*);
-    rc = sqlite3Fts2Init(db);
-  }
-#endif
-
-#ifdef SQLITE_ENABLE_FTS3 /* automatically defined by SQLITE_ENABLE_FTS4 */
-  if( !db->mallocFailed && rc==SQLITE_OK ){
-    rc = sqlite3Fts3Init(db);
-  }
-#endif
-
-#if defined(SQLITE_ENABLE_ICU) || defined(SQLITE_ENABLE_ICU_COLLATIONS)
-  if( !db->mallocFailed && rc==SQLITE_OK ){
-    rc = sqlite3IcuInit(db);
-  }
-#endif
-
-#ifdef SQLITE_ENABLE_RTREE
-  if( !db->mallocFailed && rc==SQLITE_OK){
-    rc = sqlite3RtreeInit(db);
-  }
-#endif
-
-#ifdef SQLITE_ENABLE_DBPAGE_VTAB
-  if( !db->mallocFailed && rc==SQLITE_OK){
-    rc = sqlite3DbpageRegister(db);
-  }
-#endif
-
-#ifdef SQLITE_ENABLE_DBSTAT_VTAB
-  if( !db->mallocFailed && rc==SQLITE_OK){
-    rc = sqlite3DbstatRegister(db);
-  }
-#endif
-
-#ifdef SQLITE_ENABLE_JSON1
-  if( !db->mallocFailed && rc==SQLITE_OK){
-    rc = sqlite3Json1Init(db);
-  }
-#endif
-
-#ifdef SQLITE_ENABLE_STMTVTAB
-  if( !db->mallocFailed && rc==SQLITE_OK){
-    rc = sqlite3StmtVtabInit(db);
-  }
-#endif
-
 #ifdef SQLITE_ENABLE_INTERNAL_FUNCTIONS
   /* Testing use only!!! The -DSQLITE_ENABLE_INTERNAL_FUNCTIONS=1 compile-time
-  ** option gives access to internal functions by default.  
+  ** option gives access to internal functions by default. 
   ** Testing use only!!! */
   db->mDbFlags |= DBFLAG_InternalFunc;
 #endif
@@ -3378,12 +3651,12 @@ opendb_out:
     sqlite3_mutex_leave(db->mutex);
   }
   rc = sqlite3_errcode(db);
-  assert( db!=0 || rc==SQLITE_NOMEM );
-  if( rc==SQLITE_NOMEM ){
+  assert( db!=0 || (rc&0xff)==SQLITE_NOMEM );
+  if( (rc&0xff)==SQLITE_NOMEM ){
     sqlite3_close(db);
     db = 0;
   }else if( rc!=SQLITE_OK ){
-    db->magic = SQLITE_MAGIC_SICK;
+    db->eOpenState = SQLITE_STATE_SICK;
   }
   *ppDb = db;
 #ifdef SQLITE_ENABLE_SQLLOG
@@ -3394,7 +3667,7 @@ opendb_out:
   }
 #endif
   sqlite3_free_filename(zOpen);
-  return rc & 0xff;
+  return rc;
 }
 
 
@@ -3402,8 +3675,8 @@ opendb_out:
 ** Open a new database handle.
 */
 int sqlite3_open(
-  const char *zFilename, 
-  sqlite3 **ppDb 
+  const char *zFilename,
+  sqlite3 **ppDb
 ){
   return openDatabase(zFilename, ppDb,
                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 0);
@@ -3422,7 +3695,7 @@ int sqlite3_open_v2(
 ** Open a new database handle.
 */
 int sqlite3_open16(
-  const void *zFilename, 
+  const void *zFilename,
   sqlite3 **ppDb
 ){
   char const *zFilename8;   /* zFilename encoded in UTF-8 instead of UTF-16 */
@@ -3461,9 +3734,9 @@ int sqlite3_open16(
 ** Register a new collation sequence with the database handle db.
 */
 int sqlite3_create_collation(
-  sqlite3* db, 
-  const char *zName, 
-  int enc, 
+  sqlite3* db,
+  const char *zName,
+  int enc,
   void* pCtx,
   int(*xCompare)(void*,int,const void*,int,const void*)
 ){
@@ -3474,9 +3747,9 @@ int sqlite3_create_collation(
 ** Register a new collation sequence with the database handle db.
 */
 int sqlite3_create_collation_v2(
-  sqlite3* db, 
-  const char *zName, 
-  int enc, 
+  sqlite3* db,
+  const char *zName,
+  int enc,
   void* pCtx,
   int(*xCompare)(void*,int,const void*,int,const void*),
   void(*xDel)(void*)
@@ -3499,9 +3772,9 @@ int sqlite3_create_collation_v2(
 ** Register a new collation sequence with the database handle db.
 */
 int sqlite3_create_collation16(
-  sqlite3* db, 
+  sqlite3* db,
   const void *zName,
-  int enc, 
+  int enc,
   void* pCtx,
   int(*xCompare)(void*,int,const void*,int,const void*)
 ){
@@ -3529,8 +3802,8 @@ int sqlite3_create_collation16(
 ** db. Replace any previously installed collation sequence factory.
 */
 int sqlite3_collation_needed(
-  sqlite3 *db, 
-  void *pCollNeededArg, 
+  sqlite3 *db,
+  void *pCollNeededArg,
   void(*xCollNeeded)(void*,sqlite3*,int eTextRep,const char*)
 ){
 #ifdef SQLITE_ENABLE_API_ARMOR
@@ -3550,8 +3823,8 @@ int sqlite3_collation_needed(
 ** db. Replace any previously installed collation sequence factory.
 */
 int sqlite3_collation_needed16(
-  sqlite3 *db, 
-  void *pCollNeededArg, 
+  sqlite3 *db,
+  void *pCollNeededArg,
   void(*xCollNeeded16)(void*,sqlite3*,int eTextRep,const void*)
 ){
 #ifdef SQLITE_ENABLE_API_ARMOR
@@ -3565,6 +3838,69 @@ int sqlite3_collation_needed16(
   return SQLITE_OK;
 }
 #endif /* SQLITE_OMIT_UTF16 */
+
+/*
+** Find existing client data.
+*/
+void *sqlite3_get_clientdata(sqlite3 *db, const char *zName){
+  DbClientData *p;
+  sqlite3_mutex_enter(db->mutex);
+  for(p=db->pDbData; p; p=p->pNext){
+    if( strcmp(p->zName, zName)==0 ){
+      void *pResult = p->pData;
+      sqlite3_mutex_leave(db->mutex);
+      return pResult;
+    }
+  }
+  sqlite3_mutex_leave(db->mutex);
+  return 0;
+}
+
+/*
+** Add new client data to a database connection.
+*/
+int sqlite3_set_clientdata(
+  sqlite3 *db,                   /* Attach client data to this connection */
+  const char *zName,             /* Name of the client data */
+  void *pData,                   /* The client data itself */
+  void (*xDestructor)(void*)     /* Destructor */
+){
+  DbClientData *p, **pp;
+  sqlite3_mutex_enter(db->mutex);
+  pp = &db->pDbData;
+  for(p=db->pDbData; p && strcmp(p->zName,zName); p=p->pNext){
+    pp = &p->pNext;
+  }
+  if( p ){
+    assert( p->pData!=0 );
+    if( p->xDestructor ) p->xDestructor(p->pData);
+    if( pData==0 ){
+      *pp = p->pNext;
+      sqlite3_free(p);
+      sqlite3_mutex_leave(db->mutex);
+      return SQLITE_OK;
+    }
+  }else if( pData==0 ){
+    sqlite3_mutex_leave(db->mutex);
+    return SQLITE_OK;
+  }else{
+    size_t n = strlen(zName);
+    p = sqlite3_malloc64( SZ_DBCLIENTDATA(n+1) );
+    if( p==0 ){
+      if( xDestructor ) xDestructor(pData);
+      sqlite3_mutex_leave(db->mutex);
+      return SQLITE_NOMEM;
+    }
+    memcpy(p->zName, zName, n+1);
+    p->pNext = db->pDbData;
+    db->pDbData = p;
+  }
+  p->pData = pData;
+  p->xDestructor = xDestructor;
+  sqlite3_mutex_leave(db->mutex);
+  return SQLITE_OK;
+}
+
 
 #ifndef SQLITE_OMIT_DEPRECATED
 /*
@@ -3694,22 +4030,19 @@ int sqlite3_table_column_metadata(
 
   /* Locate the table in question */
   pTab = sqlite3FindTable(db, zTableName, zDbName);
-  if( !pTab || pTab->pSelect ){
+  if( !pTab || IsView(pTab) ){
     pTab = 0;
     goto error_out;
   }
 
   /* Find the column for which info is requested */
   if( zColumnName==0 ){
-    /* Query for existance of table only */
+    /* Query for existence of table only */
   }else{
-    for(iCol=0; iCol<pTab->nCol; iCol++){
+    iCol = sqlite3ColumnIndex(pTab, zColumnName);
+    if( iCol>=0 ){
       pCol = &pTab->aCol[iCol];
-      if( 0==sqlite3StrICmp(pCol->zName, zColumnName) ){
-        break;
-      }
-    }
-    if( iCol==pTab->nCol ){
+    }else{
       if( HasRowid(pTab) && sqlite3IsRowid(zColumnName) ){
         iCol = pTab->iPKey;
         pCol = iCol>=0 ? &pTab->aCol[iCol] : 0;
@@ -3723,16 +4056,16 @@ int sqlite3_table_column_metadata(
   /* The following block stores the meta information that will be returned
   ** to the caller in local variables zDataType, zCollSeq, notnull, primarykey
   ** and autoinc. At this point there are two possibilities:
-  ** 
-  **     1. The specified column name was rowid", "oid" or "_rowid_" 
-  **        and there is no explicitly declared IPK column. 
   **
-  **     2. The table is not a view and the column name identified an 
+  **     1. The specified column name was rowid", "oid" or "_rowid_"
+  **        and there is no explicitly declared IPK column.
+  **
+  **     2. The table is not a view and the column name identified an
   **        explicitly declared column. Copy meta information from *pCol.
-  */ 
+  */
   if( pCol ){
     zDataType = sqlite3ColumnType(pCol,0);
-    zCollSeq = pCol->zColl;
+    zCollSeq = sqlite3ColumnColl(pCol);
     notnull = pCol->notNull!=0;
     primarykey  = (pCol->colFlags & COLFLAG_PRIMKEY)!=0;
     autoinc = pTab->iPKey==iCol && (pTab->tabFlags & TF_Autoincrement)!=0;
@@ -3779,10 +4112,10 @@ int sqlite3_sleep(int ms){
   pVfs = sqlite3_vfs_find(0);
   if( pVfs==0 ) return 0;
 
-  /* This function works in milliseconds, but the underlying OsSleep() 
+  /* This function works in milliseconds, but the underlying OsSleep()
   ** API uses microseconds. Hence the 1000's.
   */
-  rc = (sqlite3OsSleep(pVfs, 1000*ms)/1000);
+  rc = (sqlite3OsSleep(pVfs, ms<0 ? 0 : 1000*ms)/1000);
   return rc;
 }
 
@@ -3831,8 +4164,20 @@ int sqlite3_file_control(sqlite3 *db, const char *zDbName, int op, void *pArg){
     }else if( op==SQLITE_FCNTL_DATA_VERSION ){
       *(unsigned int*)pArg = sqlite3PagerDataVersion(pPager);
       rc = SQLITE_OK;
+    }else if( op==SQLITE_FCNTL_RESERVE_BYTES ){
+      int iNew = *(int*)pArg;
+      *(int*)pArg = sqlite3BtreeGetRequestedReserve(pBtree);
+      if( iNew>=0 && iNew<=255 ){
+        sqlite3BtreeSetPageSize(pBtree, 0, iNew, 0);
+      }
+      rc = SQLITE_OK;
+    }else if( op==SQLITE_FCNTL_RESET_CACHE ){
+      sqlite3BtreeClearCache(pBtree);
+      rc = SQLITE_OK;
     }else{
+      int nSave = db->busyHandler.nBusy;
       rc = sqlite3OsFileControl(fd, op, pArg);
+      db->busyHandler.nBusy = nSave;
     }
     sqlite3BtreeLeave(pBtree);
   }
@@ -3903,6 +4248,28 @@ int sqlite3_test_control(int op, ...){
     }
 #endif
 
+    /*  sqlite3_test_control(SQLITE_TESTCTRL_FK_NO_ACTION, sqlite3 *db, int b);
+    **
+    ** If b is true, then activate the SQLITE_FkNoAction setting.  If b is
+    ** false then clear that setting.  If the SQLITE_FkNoAction setting is
+    ** enabled, all foreign key ON DELETE and ON UPDATE actions behave as if
+    ** they were NO ACTION, regardless of how they are defined.
+    **
+    ** NB:  One must usually run "PRAGMA writable_schema=RESET" after
+    ** using this test-control, before it will take full effect.  failing
+    ** to reset the schema can result in some unexpected behavior.
+    */
+    case SQLITE_TESTCTRL_FK_NO_ACTION: {
+      sqlite3 *db = va_arg(ap, sqlite3*);
+      int b = va_arg(ap, int);
+      if( b ){
+        db->flags |= SQLITE_FkNoAction;
+      }else{
+        db->flags &= ~SQLITE_FkNoAction;
+      }
+      break;
+    }
+
     /*
     **  sqlite3_test_control(BITVEC_TEST, size, program)
     **
@@ -3930,12 +4297,16 @@ int sqlite3_test_control(int op, ...){
     ** sqlite3_test_control().
     */
     case SQLITE_TESTCTRL_FAULT_INSTALL: {
-      /* MSVC is picky about pulling func ptrs from va lists.
-      ** http://support.microsoft.com/kb/47961
+      /* A bug in MSVC prevents it from understanding pointers to functions
+      ** types in the second argument to va_arg().  Work around the problem
+      ** using a typedef.
+      ** http://support.microsoft.com/kb/47961  <-- dead hyperlink
+      ** Search at http://web.archive.org/ to find the 2015-03-16 archive
+      ** of the link above to see the original text.
       ** sqlite3GlobalConfig.xTestCallback = va_arg(ap, int(*)(int));
       */
-      typedef int(*TESTCALLBACKFUNC_t)(int);
-      sqlite3GlobalConfig.xTestCallback = va_arg(ap, TESTCALLBACKFUNC_t);
+      typedef int(*sqlite3FaultFuncType)(int);
+      sqlite3GlobalConfig.xTestCallback = va_arg(ap, sqlite3FaultFuncType);
       rc = sqlite3FaultSim(0);
       break;
     }
@@ -3943,7 +4314,7 @@ int sqlite3_test_control(int op, ...){
     /*
     **  sqlite3_test_control(BENIGN_MALLOC_HOOKS, xBegin, xEnd)
     **
-    ** Register hooks to call to indicate which malloc() failures 
+    ** Register hooks to call to indicate which malloc() failures
     ** are benign.
     */
     case SQLITE_TESTCTRL_BENIGN_MALLOC_HOOKS: {
@@ -3994,6 +4365,29 @@ int sqlite3_test_control(int op, ...){
       volatile int x = 0;
       assert( /*side-effects-ok*/ (x = va_arg(ap,int))!=0 );
       rc = x;
+#if defined(SQLITE_DEBUG)
+      /* Invoke these debugging routines so that the compiler does not
+      ** issue "defined but not used" warnings. */
+      if( x==9999 ){
+        sqlite3ShowExpr(0);
+        sqlite3ShowExprList(0);
+        sqlite3ShowIdList(0);
+        sqlite3ShowSrcList(0);
+        sqlite3ShowWith(0);
+        sqlite3ShowUpsert(0);
+#ifndef SQLITE_OMIT_TRIGGER
+        sqlite3ShowTriggerStep(0);
+        sqlite3ShowTriggerStepList(0);
+        sqlite3ShowTrigger(0);
+        sqlite3ShowTriggerList(0);
+#endif
+#ifndef SQLITE_OMIT_WINDOWFUNC
+        sqlite3ShowWindow(0);
+        sqlite3ShowWinFunc(0);
+#endif
+        sqlite3ShowSelect(0);
+      }
+#endif
       break;
     }
 
@@ -4041,29 +4435,15 @@ int sqlite3_test_control(int op, ...){
     **      10     little-endian, determined at run-time
     **  432101     big-endian,    determined at compile-time
     **  123410     little-endian, determined at compile-time
-    */ 
+    */
     case SQLITE_TESTCTRL_BYTEORDER: {
       rc = SQLITE_BYTEORDER*100 + SQLITE_LITTLEENDIAN*10 + SQLITE_BIGENDIAN;
       break;
     }
 
-    /*   sqlite3_test_control(SQLITE_TESTCTRL_RESERVE, sqlite3 *db, int N)
-    **
-    ** Set the nReserve size to N for the main database on the database
-    ** connection db.
-    */
-    case SQLITE_TESTCTRL_RESERVE: {
-      sqlite3 *db = va_arg(ap, sqlite3*);
-      int x = va_arg(ap,int);
-      sqlite3_mutex_enter(db->mutex);
-      sqlite3BtreeSetPageSize(db->aDb[0].pBt, 0, x, 0);
-      sqlite3_mutex_leave(db->mutex);
-      break;
-    }
-
     /*  sqlite3_test_control(SQLITE_TESTCTRL_OPTIMIZATIONS, sqlite3 *db, int N)
     **
-    ** Enable or disable various optimizations for testing purposes.  The 
+    ** Enable or disable various optimizations for testing purposes.  The
     ** argument N is a bitmask of optimizations to be disabled.  For normal
     ** operation N should be 0.  The idea is that a test program (like the
     ** SQL Logic Test or SLT test module) can run the same SQL multiple times
@@ -4072,17 +4452,43 @@ int sqlite3_test_control(int op, ...){
     */
     case SQLITE_TESTCTRL_OPTIMIZATIONS: {
       sqlite3 *db = va_arg(ap, sqlite3*);
-      db->dbOptFlags = (u16)(va_arg(ap, int) & 0xffff);
+      db->dbOptFlags = va_arg(ap, u32);
       break;
     }
 
-    /*   sqlite3_test_control(SQLITE_TESTCTRL_LOCALTIME_FAULT, int onoff);
+    /*  sqlite3_test_control(SQLITE_TESTCTRL_GETOPT, sqlite3 *db, int *N)
     **
-    ** If parameter onoff is non-zero, subsequent calls to localtime()
-    ** and its variants fail. If onoff is zero, undo this setting.
+    ** Write the current optimization settings into *N.  A zero bit means that
+    ** the optimization is on, and a 1 bit means that the optimization is off.
+    */
+    case SQLITE_TESTCTRL_GETOPT: {
+      sqlite3 *db = va_arg(ap, sqlite3*);
+      int *pN = va_arg(ap, int*);
+      *pN = db->dbOptFlags;
+      break;
+    }
+
+    /*   sqlite3_test_control(SQLITE_TESTCTRL_LOCALTIME_FAULT, onoff, xAlt);
+    **
+    ** If parameter onoff is 1, subsequent calls to localtime() fail.
+    ** If 2, then invoke xAlt() instead of localtime().  If 0, normal
+    ** processing.
+    **
+    ** xAlt arguments are void pointers, but they really want to be:
+    **
+    **    int xAlt(const time_t*, struct tm*);
+    **
+    ** xAlt should write results in to struct tm object of its 2nd argument
+    ** and return zero on success, or return non-zero on failure.
     */
     case SQLITE_TESTCTRL_LOCALTIME_FAULT: {
       sqlite3GlobalConfig.bLocaltimeFault = va_arg(ap, int);
+      if( sqlite3GlobalConfig.bLocaltimeFault==2 ){
+        typedef int(*sqlite3LocaltimeType)(const void*,void*);
+        sqlite3GlobalConfig.xAltLocaltime = va_arg(ap, sqlite3LocaltimeType);
+      }else{
+        sqlite3GlobalConfig.xAltLocaltime = 0;
+      }
       break;
     }
 
@@ -4103,7 +4509,7 @@ int sqlite3_test_control(int op, ...){
     ** formed and never corrupt.  This flag is clear by default, indicating that
     ** database files might have arbitrary corruption.  Setting the flag during
     ** testing causes certain assert() statements in the code to be activated
-    ** that demonstrat invariants on well-formed database files.
+    ** that demonstrate invariants on well-formed database files.
     */
     case SQLITE_TESTCTRL_NEVER_CORRUPT: {
       sqlite3GlobalConfig.neverCorrupt = va_arg(ap, int);
@@ -4113,8 +4519,14 @@ int sqlite3_test_control(int op, ...){
     /*   sqlite3_test_control(SQLITE_TESTCTRL_EXTRA_SCHEMA_CHECKS, int);
     **
     ** Set or clear a flag that causes SQLite to verify that type, name,
-    ** and tbl_name fields of the sqlite_master table.  This is normally
+    ** and tbl_name fields of the sqlite_schema table.  This is normally
     ** on, but it is sometimes useful to turn it off for testing.
+    **
+    ** 2020-07-22:  Disabling EXTRA_SCHEMA_CHECKS also disables the
+    ** verification of rootpage numbers when parsing the schema.  This
+    ** is useful to make it easier to reach strange internal error states
+    ** during testing.  The EXTRA_SCHEMA_CHECKS setting is always enabled
+    ** in production.
     */
     case SQLITE_TESTCTRL_EXTRA_SCHEMA_CHECKS: {
       sqlite3GlobalConfig.bExtraSchemaChecks = va_arg(ap, int);
@@ -4133,7 +4545,7 @@ int sqlite3_test_control(int op, ...){
 
     /*   sqlite3_test_control(SQLITE_TESTCTRL_VDBE_COVERAGE, xCallback, ptr);
     **
-    ** Set the VDBE coverage callback function to xCallback with context 
+    ** Set the VDBE coverage callback function to xCallback with context
     ** pointer ptr.
     */
     case SQLITE_TESTCTRL_VDBE_COVERAGE: {
@@ -4163,13 +4575,15 @@ int sqlite3_test_control(int op, ...){
       break;
     }
 
-    /*  sqlite3_test_control(SQLITE_TESTCTRL_IMPOSTER, db, dbName, onOff, tnum);
+    /*  sqlite3_test_control(SQLITE_TESTCTRL_IMPOSTER, db, dbName, mode, tnum);
     **
     ** This test control is used to create imposter tables.  "db" is a pointer
     ** to the database connection.  dbName is the database name (ex: "main" or
-    ** "temp") which will receive the imposter.  "onOff" turns imposter mode on
-    ** or off.  "tnum" is the root page of the b-tree to which the imposter
-    ** table should connect.
+    ** "temp") which will receive the imposter.  "mode" turns imposter mode on
+    ** or off.  mode==0 means imposter mode is off.  mode==1 means imposter mode
+    ** is on.  mode==2 means imposter mode is on but results in an imposter
+    ** table that is read-only unless writable_schema is on.  "tnum" is the
+    ** root page of the b-tree to which the imposter table should connect.
     **
     ** Enable imposter mode only when the schema has already been parsed.  Then
     ** run a single CREATE TABLE statement to construct the imposter table in
@@ -4181,12 +4595,16 @@ int sqlite3_test_control(int op, ...){
     */
     case SQLITE_TESTCTRL_IMPOSTER: {
       sqlite3 *db = va_arg(ap, sqlite3*);
+      int iDb;
       sqlite3_mutex_enter(db->mutex);
-      db->init.iDb = sqlite3FindDbName(db, va_arg(ap,const char*));
-      db->init.busy = db->init.imposterTable = va_arg(ap,int);
-      db->init.newTnum = va_arg(ap,int);
-      if( db->init.busy==0 && db->init.newTnum>0 ){
-        sqlite3ResetAllSchemasOfConnection(db);
+      iDb = sqlite3FindDbName(db, va_arg(ap,const char*));
+      if( iDb>=0 ){
+        db->init.iDb = iDb;
+        db->init.busy = db->init.imposterTable = va_arg(ap,int);
+        db->init.newTnum = va_arg(ap,int);
+        if( db->init.busy==0 && db->init.newTnum>0 ){
+          sqlite3ResetAllSchemasOfConnection(db);
+        }
       }
       sqlite3_mutex_leave(db->mutex);
       break;
@@ -4221,6 +4639,117 @@ int sqlite3_test_control(int op, ...){
     case SQLITE_TESTCTRL_RESULT_INTREAL: {
       sqlite3_context *pCtx = va_arg(ap, sqlite3_context*);
       sqlite3ResultIntReal(pCtx);
+      break;
+    }
+
+    /*  sqlite3_test_control(SQLITE_TESTCTRL_SEEK_COUNT,
+    **    sqlite3 *db,    // Database connection
+    **    u64 *pnSeek     // Write seek count here
+    **  );
+    **
+    ** This test-control queries the seek-counter on the "main" database
+    ** file.  The seek-counter is written into *pnSeek and is then reset.
+    ** The seek-count is only available if compiled with SQLITE_DEBUG.
+    */
+    case SQLITE_TESTCTRL_SEEK_COUNT: {
+      sqlite3 *db = va_arg(ap, sqlite3*);
+      u64 *pn = va_arg(ap, sqlite3_uint64*);
+      *pn = sqlite3BtreeSeekCount(db->aDb->pBt);
+      (void)db;  /* Silence harmless unused variable warning */
+      break;
+    }
+
+    /*  sqlite3_test_control(SQLITE_TESTCTRL_TRACEFLAGS, op, ptr)
+    **
+    **  "ptr" is a pointer to a u32. 
+    **
+    **   op==0       Store the current sqlite3TreeTrace in *ptr
+    **   op==1       Set sqlite3TreeTrace to the value *ptr
+    **   op==2       Store the current sqlite3WhereTrace in *ptr
+    **   op==3       Set sqlite3WhereTrace to the value *ptr
+    */
+    case SQLITE_TESTCTRL_TRACEFLAGS: {
+       int opTrace = va_arg(ap, int);
+       u32 *ptr = va_arg(ap, u32*);
+       switch( opTrace ){
+         case 0:   *ptr = sqlite3TreeTrace;      break;
+         case 1:   sqlite3TreeTrace = *ptr;      break;
+         case 2:   *ptr = sqlite3WhereTrace;     break;
+         case 3:   sqlite3WhereTrace = *ptr;     break;
+       }
+       break;
+    }
+
+    /* sqlite3_test_control(SQLITE_TESTCTRL_LOGEST,
+    **      double fIn,     // Input value
+    **      int *pLogEst,   // sqlite3LogEstFromDouble(fIn)
+    **      u64 *pInt,      // sqlite3LogEstToInt(*pLogEst)
+    **      int *pLogEst2   // sqlite3LogEst(*pInt)
+    ** );
+    **
+    ** Test access for the LogEst conversion routines.
+    */
+    case SQLITE_TESTCTRL_LOGEST: {
+      double rIn = va_arg(ap, double);
+      LogEst rLogEst = sqlite3LogEstFromDouble(rIn);
+      int *pI1 = va_arg(ap,int*);
+      u64 *pU64 = va_arg(ap,u64*);
+      int *pI2 = va_arg(ap,int*);
+      *pI1 = rLogEst;
+      *pU64 = sqlite3LogEstToInt(rLogEst);
+      *pI2 = sqlite3LogEst(*pU64);
+      break;
+    }
+
+#if defined(SQLITE_DEBUG) && !defined(SQLITE_OMIT_WSD)
+    /* sqlite3_test_control(SQLITE_TESTCTRL_TUNE, id, *piValue)
+    **
+    ** If "id" is an integer between 1 and SQLITE_NTUNE then set the value
+    ** of the id-th tuning parameter to *piValue.  If "id" is between -1
+    ** and -SQLITE_NTUNE, then write the current value of the (-id)-th
+    ** tuning parameter into *piValue.
+    **
+    ** Tuning parameters are for use during transient development builds,
+    ** to help find the best values for constants in the query planner.
+    ** Access tuning parameters using the Tuning(ID) macro.  Set the
+    ** parameters in the CLI using ".testctrl tune ID VALUE".
+    **
+    ** Transient use only.  Tuning parameters should not be used in
+    ** checked-in code.
+    */
+    case SQLITE_TESTCTRL_TUNE: {
+      int id = va_arg(ap, int);
+      int *piValue = va_arg(ap, int*);
+      if( id>0 && id<=SQLITE_NTUNE ){
+        Tuning(id) = *piValue;
+      }else if( id<0 && id>=-SQLITE_NTUNE ){
+        *piValue = Tuning(-id);
+      }else{
+        rc = SQLITE_NOTFOUND;
+      }
+      break;
+    }
+#endif
+
+    /* sqlite3_test_control(SQLITE_TESTCTRL_JSON_SELFCHECK, &onOff);
+    **
+    ** Activate or deactivate validation of JSONB that is generated from
+    ** text.  Off by default, as the validation is slow.  Validation is
+    ** only available if compiled using SQLITE_DEBUG.
+    **
+    ** If onOff is initially 1, then turn it on.  If onOff is initially
+    ** off, turn it off.  If onOff is initially -1, then change onOff
+    ** to be the current setting.
+    */
+    case SQLITE_TESTCTRL_JSON_SELFCHECK: {
+#if defined(SQLITE_DEBUG) && !defined(SQLITE_OMIT_WSD)
+      int *pOnOff = va_arg(ap, int*);
+      if( *pOnOff<0 ){
+        *pOnOff = sqlite3Config.bJsonSelfcheck;
+      }else{
+        sqlite3Config.bJsonSelfcheck = (u8)((*pOnOff)&0xff);
+      }
+#endif
       break;
     }
   }
@@ -4263,7 +4792,7 @@ static char *appendText(char *p, const char *z){
 ** Memory layout must be compatible with that generated by the pager
 ** and expected by sqlite3_uri_parameter() and databaseName().
 */
-char *sqlite3_create_filename(
+const char *sqlite3_create_filename(
   const char *zDatabase,
   const char *zJournal,
   const char *zWal,
@@ -4299,16 +4828,16 @@ char *sqlite3_create_filename(
 ** error to call this routine with any parameter other than a pointer
 ** previously obtained from sqlite3_create_filename() or a NULL pointer.
 */
-void sqlite3_free_filename(char *p){
+void sqlite3_free_filename(const char *p){
   if( p==0 ) return;
-  p = (char*)databaseName(p);
-  sqlite3_free(p - 4);
+  p = databaseName(p);
+  sqlite3_free((char*)p - 4);
 }
 
 
 /*
 ** This is a utility routine, useful to VFS implementations, that checks
-** to see if a database file was a URI that contained a specific query 
+** to see if a database file was a URI that contained a specific query
 ** parameter, and if so obtains the value of the query parameter.
 **
 ** The zFilename argument is the filename pointer passed into the xOpen()
@@ -4330,7 +4859,7 @@ const char *sqlite3_uri_key(const char *zFilename, int N){
   if( zFilename==0 || N<0 ) return 0;
   zFilename = databaseName(zFilename);
   zFilename += sqlite3Strlen30(zFilename) + 1;
-  while( zFilename[0] && (N--)>0 ){
+  while( ALWAYS(zFilename) && zFilename[0] && (N--)>0 ){
     zFilename += sqlite3Strlen30(zFilename) + 1;
     zFilename += sqlite3Strlen30(zFilename) + 1;
   }
@@ -4373,12 +4902,14 @@ sqlite3_int64 sqlite3_uri_int64(
 ** corruption.
 */
 const char *sqlite3_filename_database(const char *zFilename){
+  if( zFilename==0 ) return 0;
   return databaseName(zFilename);
 }
 const char *sqlite3_filename_journal(const char *zFilename){
+  if( zFilename==0 ) return 0;
   zFilename = databaseName(zFilename);
   zFilename += sqlite3Strlen30(zFilename) + 1;
-  while( zFilename[0] ){
+  while( ALWAYS(zFilename) && zFilename[0] ){
     zFilename += sqlite3Strlen30(zFilename) + 1;
     zFilename += sqlite3Strlen30(zFilename) + 1;
   }
@@ -4386,10 +4917,11 @@ const char *sqlite3_filename_journal(const char *zFilename){
 }
 const char *sqlite3_filename_wal(const char *zFilename){
 #ifdef SQLITE_OMIT_WAL
+  UNUSED_PARAMETER(zFilename);
   return 0;
 #else
   zFilename = sqlite3_filename_journal(zFilename);
-  zFilename += sqlite3Strlen30(zFilename) + 1;
+  if( zFilename ) zFilename += sqlite3Strlen30(zFilename) + 1;
   return zFilename;
 #endif
 }
@@ -4400,6 +4932,24 @@ const char *sqlite3_filename_wal(const char *zFilename){
 Btree *sqlite3DbNameToBtree(sqlite3 *db, const char *zDbName){
   int iDb = zDbName ? sqlite3FindDbName(db, zDbName) : 0;
   return iDb<0 ? 0 : db->aDb[iDb].pBt;
+}
+
+/*
+** Return the name of the N-th database schema.  Return NULL if N is out
+** of range.
+*/
+const char *sqlite3_db_name(sqlite3 *db, int N){
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( !sqlite3SafetyCheckOk(db) ){
+    (void)SQLITE_MISUSE_BKPT;
+    return 0;
+  }
+#endif
+  if( N<0 || N>=db->nDb ){
+    return 0;
+  }else{
+    return db->aDb[N].zDbSName;
+  }
 }
 
 /*
@@ -4436,11 +4986,11 @@ int sqlite3_db_readonly(sqlite3 *db, const char *zDbName){
 
 #ifdef SQLITE_ENABLE_SNAPSHOT
 /*
-** Obtain a snapshot handle for the snapshot of database zDb currently 
+** Obtain a snapshot handle for the snapshot of database zDb currently
 ** being read by handle db.
 */
 int sqlite3_snapshot_get(
-  sqlite3 *db, 
+  sqlite3 *db,
   const char *zDb,
   sqlite3_snapshot **ppSnapshot
 ){
@@ -4458,8 +5008,12 @@ int sqlite3_snapshot_get(
     int iDb = sqlite3FindDbName(db, zDb);
     if( iDb==0 || iDb>1 ){
       Btree *pBt = db->aDb[iDb].pBt;
-      if( 0==sqlite3BtreeIsInTrans(pBt) ){
+      if( SQLITE_TXN_WRITE!=sqlite3BtreeTxnState(pBt) ){
+        Pager *pPager = sqlite3BtreePager(pBt);
+        i64 dummy = 0;
+        sqlite3PagerSnapshotOpen(pPager, (sqlite3_snapshot*)&dummy);
         rc = sqlite3BtreeBeginTrans(pBt, 0, 0);
+        sqlite3PagerSnapshotOpen(pPager, 0);
         if( rc==SQLITE_OK ){
           rc = sqlite3PagerSnapshotGet(sqlite3BtreePager(pBt), ppSnapshot);
         }
@@ -4473,11 +5027,11 @@ int sqlite3_snapshot_get(
 }
 
 /*
-** Open a read-transaction on the snapshot idendified by pSnapshot.
+** Open a read-transaction on the snapshot identified by pSnapshot.
 */
 int sqlite3_snapshot_open(
-  sqlite3 *db, 
-  const char *zDb, 
+  sqlite3 *db,
+  const char *zDb,
   sqlite3_snapshot *pSnapshot
 ){
   int rc = SQLITE_ERROR;
@@ -4494,10 +5048,10 @@ int sqlite3_snapshot_open(
     iDb = sqlite3FindDbName(db, zDb);
     if( iDb==0 || iDb>1 ){
       Btree *pBt = db->aDb[iDb].pBt;
-      if( sqlite3BtreeIsInTrans(pBt)==0 ){
+      if( sqlite3BtreeTxnState(pBt)!=SQLITE_TXN_WRITE ){
         Pager *pPager = sqlite3BtreePager(pBt);
         int bUnlock = 0;
-        if( sqlite3BtreeIsInReadTrans(pBt) ){
+        if( sqlite3BtreeTxnState(pBt)!=SQLITE_TXN_NONE ){
           if( db->nVdbeActive==0 ){
             rc = sqlite3PagerSnapshotCheck(pPager, pSnapshot);
             if( rc==SQLITE_OK ){
@@ -4533,8 +5087,8 @@ int sqlite3_snapshot_open(
 */
 int sqlite3_snapshot_recover(sqlite3 *db, const char *zDb){
   int rc = SQLITE_ERROR;
-  int iDb;
 #ifndef SQLITE_OMIT_WAL
+  int iDb;
 
 #ifdef SQLITE_ENABLE_API_ARMOR
   if( !sqlite3SafetyCheckOk(db) ){
@@ -4546,7 +5100,7 @@ int sqlite3_snapshot_recover(sqlite3 *db, const char *zDb){
   iDb = sqlite3FindDbName(db, zDb);
   if( iDb==0 || iDb>1 ){
     Btree *pBt = db->aDb[iDb].pBt;
-    if( 0==sqlite3BtreeIsInReadTrans(pBt) ){
+    if( SQLITE_TXN_NONE==sqlite3BtreeTxnState(pBt) ){
       rc = sqlite3BtreeBeginTrans(pBt, 0, 0);
       if( rc==SQLITE_OK ){
         rc = sqlite3PagerSnapshotRecover(sqlite3BtreePager(pBt));
@@ -4579,8 +5133,8 @@ int sqlite3_compileoption_used(const char *zOptName){
   int i, n;
   int nOpt;
   const char **azCompileOpt;
- 
-#if SQLITE_ENABLE_API_ARMOR
+
+#ifdef SQLITE_ENABLE_API_ARMOR
   if( zOptName==0 ){
     (void)SQLITE_MISUSE_BKPT;
     return 0;
@@ -4592,7 +5146,7 @@ int sqlite3_compileoption_used(const char *zOptName){
   if( sqlite3StrNICmp(zOptName, "SQLITE_", 7)==0 ) zOptName += 7;
   n = sqlite3Strlen30(zOptName);
 
-  /* Since nOpt is normally in single digits, a linear search is 
+  /* Since nOpt is normally in single digits, a linear search is
   ** adequate. No need for a binary search. */
   for(i=0; i<nOpt; i++){
     if( sqlite3StrNICmp(zOptName, azCompileOpt[i], n)==0

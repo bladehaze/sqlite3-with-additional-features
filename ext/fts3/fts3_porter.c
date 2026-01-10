@@ -256,7 +256,7 @@ static int star_oh(const char *z){
 
 /*
 ** If the word ends with zFrom and xCond() is true for the stem
-** of the word that preceeds the zFrom ending, then change the 
+** of the word that precedes the zFrom ending, then change the 
 ** ending to zTo.
 **
 ** The input word *pz and zFrom are both in reverse order.  zTo
@@ -621,7 +621,7 @@ static int porterNext(
       if( n>c->nAllocated ){
         char *pNew;
         c->nAllocated = n+20;
-        pNew = sqlite3_realloc(c->zToken, c->nAllocated);
+        pNew = sqlite3_realloc64(c->zToken, c->nAllocated);
         if( !pNew ) return SQLITE_NOMEM;
         c->zToken = pNew;
       }

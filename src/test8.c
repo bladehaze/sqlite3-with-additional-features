@@ -14,11 +14,7 @@
 ** testing of the SQLite library.
 */
 #include "sqliteInt.h"
-#if defined(INCLUDE_SQLITE_TCL_H)
-#  include "sqlite_tcl.h"
-#else
-#  include "tcl.h"
-#endif
+#include "tclsqlite.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,7 +25,7 @@ typedef struct echo_cursor echo_cursor;
 
 /*
 ** The test module defined in this file uses four global Tcl variables to
-** commicate with test-scripts:
+** communicate with test-scripts:
 **
 **     $::echo_module
 **     $::echo_module_sync_fail
@@ -341,7 +337,7 @@ static int echoDeclareVtab(
   if( pVtab->zTableName ){
     sqlite3_stmt *pStmt = 0;
     rc = sqlite3_prepare(db, 
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
         -1, &pStmt, 0);
     if( rc==SQLITE_OK ){
       sqlite3_bind_text(pStmt, 1, pVtab->zTableName, -1, 0);
@@ -389,6 +385,7 @@ static int echoDestructor(sqlite3_vtab *pVtab){
 typedef struct EchoModule EchoModule;
 struct EchoModule {
   Tcl_Interp *interp;
+  sqlite3 *db;
 };
 
 /*
@@ -1316,7 +1313,12 @@ static sqlite3_module echoModule = {
   echoCommit,                /* xCommit - commit transaction */
   echoRollback,              /* xRollback - rollback transaction */
   echoFindFunction,          /* xFindFunction - function overloading */
-  echoRename                 /* xRename - rename the table */
+  echoRename,                /* xRename - rename the table */
+  0,                         /* xSavepoint */
+  0,                         /* xRelease */
+  0,                         /* xRollbackTo */
+  0,                         /* xShadowName */
+  0                          /* xIntegrity */
 };
 
 static sqlite3_module echoModuleV2 = {
@@ -1342,7 +1344,9 @@ static sqlite3_module echoModuleV2 = {
   echoRename,                /* xRename - rename the table */
   echoSavepoint,
   echoRelease,
-  echoRollbackTo
+  echoRollbackTo,
+  0,                         /* xShadowName */
+  0                          /* xIntegrity  */
 };
 
 /*
@@ -1352,6 +1356,9 @@ extern int getDbPointer(Tcl_Interp *interp, const char *zA, sqlite3 **ppDb);
 extern const char *sqlite3ErrName(int);
 
 static void moduleDestroy(void *p){
+  EchoModule *pMod = (EchoModule*)p;
+  sqlite3_create_function(pMod->db, "function_that_does_not_exist_0982ma98",
+                          SQLITE_ANY, 1, 0, 0, 0, 0);
   sqlite3_free(p);
 }
 
@@ -1376,6 +1383,7 @@ static int SQLITE_TCLAPI register_echo_module(
   /* Virtual table module "echo" */
   pMod = sqlite3_malloc(sizeof(EchoModule));
   pMod->interp = interp;
+  pMod->db = db;
   rc = sqlite3_create_module_v2(
       db, "echo", &echoModule, (void*)pMod, moduleDestroy
   );
@@ -1384,6 +1392,7 @@ static int SQLITE_TCLAPI register_echo_module(
   if( rc==SQLITE_OK ){
     pMod = sqlite3_malloc(sizeof(EchoModule));
     pMod->interp = interp;
+    pMod->db = db;
     rc = sqlite3_create_module_v2(db, "echo_v2", 
         &echoModuleV2, (void*)pMod, moduleDestroy
     );

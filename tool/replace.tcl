@@ -4,12 +4,12 @@
 # only lines successfully modified with a regular
 # expression.
 #
-fconfigure stdout -translation binary -encoding binary
-fconfigure stderr -translation binary -encoding binary
+fconfigure stdout -translation binary
+fconfigure stderr -translation binary
 set mode [string tolower [lindex $argv 0]]
 set from [lindex $argv 1]
 set to [lindex $argv 2]
-if {$mode ni [list exact regsub include]} {exit 1}
+if {-1 == [lsearch -exact [list exact regsub include] $mode]} {exit 1}
 if {[string length $from]==0} {exit 2}
 while {![eof stdin]} {
   set line [gets stdin]

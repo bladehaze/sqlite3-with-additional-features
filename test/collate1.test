@@ -23,7 +23,7 @@ set testprefix collate1
 # collate1-1.* - Single-field ORDER BY with an explicit COLLATE clause.
 # collate1-2.* - Multi-field ORDER BY with an explicit COLLATE clause.
 # collate1-3.* - ORDER BY using a default collation type. Also that an 
-#                explict collate type overrides a default collate type.
+#                explicit collate type overrides a default collate type.
 # collate1-4.* - ORDER BY using a data type.
 #
 
@@ -338,6 +338,7 @@ do_test collate1-5.3 {
 #-------------------------------------------------------------------------
 # Fix problems with handling collation sequences named '"""'.
 #
+sqlite3_db_config db SQLITE_DBCONFIG_DQS_DML 1
 do_execsql_test 6.1 {
   SELECT """""""";
 } {\"\"\"}

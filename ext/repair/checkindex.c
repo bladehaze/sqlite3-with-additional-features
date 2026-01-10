@@ -110,7 +110,7 @@ static int cidxConnect(
       " current_key TEXT,"       /* SQLite quote() text of key values */
       " index_name HIDDEN,"      /* IN: name of the index being scanned */
       " after_key HIDDEN,"       /* IN: Start scanning after this key */
-      " scanner_sql HIDDEN"      /* debuggingn info: SQL used for scanner */
+      " scanner_sql HIDDEN"      /* debugging info: SQL used for scanner */
       ")"
   );
   pRet = cidxMalloc(&rc, sizeof(CidxTable));
@@ -473,7 +473,7 @@ static int cidxLookupIndex(
     
   /* Find the table for this index. */
   pFindTab = cidxPrepare(&rc, pCsr, 
-      "SELECT tbl_name, sql FROM sqlite_master WHERE name=%Q AND type='index'",
+      "SELECT tbl_name, sql FROM sqlite_schema WHERE name=%Q AND type='index'",
       zIdx
   );
   if( rc==SQLITE_OK && sqlite3_step(pFindTab)==SQLITE_ROW ){
@@ -907,6 +907,8 @@ static int ciInit(sqlite3 *db){
     0,                            /* xSavepoint */
     0,                            /* xRelease */
     0,                            /* xRollbackTo */
+    0,                            /* xShadowName */
+    0                             /* xIntegrity */
   };
   return sqlite3_create_module(db, "incremental_index_check", &cidx_module, 0);
 }

@@ -14,9 +14,19 @@
 #ifndef _FTSINT_H
 #define _FTSINT_H
 
-#if !defined(NDEBUG) && !defined(SQLITE_DEBUG) 
+/*
+** Activate assert() only if SQLITE_TEST is enabled.
+*/
+#if !defined(NDEBUG) && !defined(SQLITE_DEBUG)
 # define NDEBUG 1
 #endif
+
+#include <assert.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdarg.h>
 
 /* FTS3/FTS4 require virtual tables */
 #ifdef SQLITE_OMIT_VIRTUALTABLE
@@ -37,7 +47,7 @@
 
 /* If not building as part of the core, include sqlite3ext.h. */
 #ifndef SQLITE_CORE
-# include "sqlite3ext.h" 
+# include "sqlite3ext.h"
 SQLITE_EXTENSION_INIT3
 #endif
 
@@ -134,7 +144,7 @@ SQLITE_EXTENSION_INIT3
 ** is used for assert() conditions that are true only if it can be 
 ** guranteed that the database is not corrupt.
 */
-#if defined(SQLITE_DEBUG) || defined(SQLITE_TEST)
+#ifdef SQLITE_DEBUG
 extern int sqlite3_fts3_may_be_corrupt;
 # define assert_fts3_nc(x) assert(sqlite3_fts3_may_be_corrupt || (x))
 #else
@@ -151,17 +161,18 @@ extern int sqlite3_fts3_may_be_corrupt;
 ** Macros indicating that conditional expressions are always true or
 ** false.
 */
-#ifdef SQLITE_COVERAGE_TEST
-# define ALWAYS(x) (1)
-# define NEVER(X)  (0)
-#elif defined(SQLITE_DEBUG)
-# define ALWAYS(x) sqlite3Fts3Always((x)!=0)
-# define NEVER(x) sqlite3Fts3Never((x)!=0)
-int sqlite3Fts3Always(int b);
-int sqlite3Fts3Never(int b);
+#if defined(SQLITE_COVERAGE_TEST) || defined(SQLITE_MUTATION_TEST)
+# define SQLITE_OMIT_AUXILIARY_SAFETY_CHECKS 1
+#endif
+#if defined(SQLITE_OMIT_AUXILIARY_SAFETY_CHECKS)
+# define ALWAYS(X)      (1)
+# define NEVER(X)       (0)
+#elif !defined(NDEBUG)
+# define ALWAYS(X)      ((X)?1:(assert(0),0))
+# define NEVER(X)       ((X)?(assert(0),1):0)
 #else
-# define ALWAYS(x) (x)
-# define NEVER(x)  (x)
+# define ALWAYS(X)      (X)
+# define NEVER(X)       (X)
 #endif
 
 /*
@@ -179,13 +190,6 @@ typedef sqlite3_int64 i64;        /* 8-byte signed integer */
 #define UNUSED_PARAMETER(x) (void)(x)
 
 /*
-** Activate assert() only if SQLITE_TEST is enabled.
-*/
-#if !defined(NDEBUG) && !defined(SQLITE_DEBUG) 
-# define NDEBUG 1
-#endif
-
-/*
 ** The TESTONLY macro is used to enclose variable declarations or
 ** other bits of code that are needed to support the arguments
 ** within testcase() and assert() macros.
@@ -198,6 +202,21 @@ typedef sqlite3_int64 i64;        /* 8-byte signed integer */
 
 #define LARGEST_INT64  (0xffffffff|(((i64)0x7fffffff)<<32))
 #define SMALLEST_INT64 (((i64)-1) - LARGEST_INT64)
+
+#define deliberate_fall_through
+
+/*
+** Macros needed to provide flexible arrays in a portable way
+*/
+#ifndef offsetof
+# define offsetof(ST,M) ((size_t)((char*)&((ST*)0)->M - (char*)0))
+#endif
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 199901L)
+# define FLEXARRAY
+#else
+# define FLEXARRAY 1
+#endif
+
 
 #endif /* SQLITE_AMALGAMATION */
 
@@ -262,6 +281,7 @@ struct Fts3Table {
   int nPgsz;                      /* Page size for host database */
   char *zSegmentsTbl;             /* Name of %_segments table */
   sqlite3_blob *pSegments;        /* Blob handle open on %_segments table */
+  int iSavepoint;
 
   /* 
   ** The following array of hash tables is used to buffer pending index 
@@ -302,7 +322,7 @@ struct Fts3Table {
 #endif
 
 #if defined(SQLITE_DEBUG) || defined(SQLITE_TEST)
-  /* True to disable the incremental doclist optimization. This is controled
+  /* True to disable the incremental doclist optimization. This is controlled
   ** by special insert command 'test-no-incr-doclist'.  */
   int bNoIncrDoclist;
 
@@ -354,7 +374,7 @@ struct Fts3Cursor {
 
 /*
 ** The Fts3Cursor.eSearch member is always set to one of the following.
-** Actualy, Fts3Cursor.eSearch can be greater than or equal to
+** Actually, Fts3Cursor.eSearch can be greater than or equal to
 ** FTS3_FULLTEXT_SEARCH.  If so, then Fts3Cursor.eSearch - 2 is the index
 ** of the column to be searched.  For example, in
 **
@@ -427,8 +447,12 @@ struct Fts3Phrase {
   */
   int nToken;                /* Number of tokens in the phrase */
   int iColumn;               /* Index of column this phrase must match */
-  Fts3PhraseToken aToken[1]; /* One entry for each token in the phrase */
+  Fts3PhraseToken aToken[FLEXARRAY]; /* One for each token in the phrase */
 };
+
+/* Size (in bytes) of an Fts3Phrase object large enough to hold N tokens */
+#define SZ_FTS3PHRASE(N) \
+  (offsetof(Fts3Phrase,aToken)+(N)*sizeof(Fts3PhraseToken))
 
 /*
 ** A tree of these objects forms the RHS of a MATCH operator.
@@ -555,7 +579,7 @@ struct Fts3MultiSegReader {
   int nAdvance;                   /* How many seg-readers to advance */
   Fts3SegFilter *pFilter;         /* Pointer to filter object */
   char *aBuffer;                  /* Buffer to merge doclists in */
-  int nBuffer;                    /* Allocated size of aBuffer[] in bytes */
+  i64 nBuffer;                    /* Allocated size of aBuffer[] in bytes */
 
   int iColFilter;                 /* If >=0, filter for this column */
   int bRestart;
@@ -577,6 +601,15 @@ int sqlite3Fts3Incrmerge(Fts3Table*,int,int);
   (*(u8*)(p)&0x80) ? sqlite3Fts3GetVarint32(p, piVal) : (*piVal=*(u8*)(p), 1) \
 )
 
+int sqlite3Fts3PrepareStmt(
+  Fts3Table *p,                   /* Prepare for this connection */
+  const char *zSql,               /* SQL to prepare */
+  int bPersist,                   /* True to set SQLITE_PREPARE_PERSISTENT */
+  int bAllowVtab,                 /* True to omit SQLITE_PREPARE_NO_VTAB */
+  sqlite3_stmt **pp               /* OUT: Prepared statement */
+);
+
+
 /* fts3.c */
 void sqlite3Fts3ErrMsg(char**,const char*,...);
 int sqlite3Fts3PutVarint(char *, sqlite3_int64);
@@ -591,6 +624,7 @@ int sqlite3Fts3EvalPhraseStats(Fts3Cursor *, Fts3Expr *, u32 *);
 int sqlite3Fts3FirstFilter(sqlite3_int64, char *, int, char *);
 void sqlite3Fts3CreateStatTable(int*, Fts3Table*);
 int sqlite3Fts3EvalTestDeferred(Fts3Cursor *pCsr, int *pRc);
+int sqlite3Fts3ReadInt(const char *z, int *pnOut);
 
 /* fts3_tokenizer.c */
 const char *sqlite3Fts3NextToken(const char *, int *);
@@ -617,6 +651,7 @@ void sqlite3Fts3ExprFree(Fts3Expr *);
 int sqlite3Fts3ExprInitTestInterface(sqlite3 *db, Fts3Hash*);
 int sqlite3Fts3InitTerm(sqlite3 *db);
 #endif
+void *sqlite3Fts3MallocZero(i64 nByte);
 
 int sqlite3Fts3OpenTokenizer(sqlite3_tokenizer *, int, const char *, int,
   sqlite3_tokenizer_cursor **
@@ -634,9 +669,10 @@ int sqlite3Fts3MsrIncrNext(
 int sqlite3Fts3EvalPhrasePoslist(Fts3Cursor *, Fts3Expr *, int iCol, char **); 
 int sqlite3Fts3MsrOvfl(Fts3Cursor *, Fts3MultiSegReader *, int *);
 int sqlite3Fts3MsrIncrRestart(Fts3MultiSegReader *pCsr);
+int sqlite3Fts3MsrCancel(Fts3Cursor*, Fts3Expr*);
 
 /* fts3_tokenize_vtab.c */
-int sqlite3Fts3InitTok(sqlite3*, Fts3Hash *);
+int sqlite3Fts3InitTok(sqlite3*, Fts3Hash *, void(*xDestroy)(void*));
 
 /* fts3_unicode2.c (functions generated by parsing unicode text files) */
 #ifndef SQLITE_DISABLE_FTS3_UNICODE
@@ -644,6 +680,10 @@ int sqlite3FtsUnicodeFold(int, int);
 int sqlite3FtsUnicodeIsalnum(int);
 int sqlite3FtsUnicodeIsdiacritic(int);
 #endif
+
+int sqlite3Fts3ExprIterate(Fts3Expr*, int (*x)(Fts3Expr*,int,void*), void*);
+
+int sqlite3Fts3IntegrityCheck(Fts3Table *p, int *pbOk);
 
 #endif /* !SQLITE_CORE || SQLITE_ENABLE_FTS3 */
 #endif /* _FTSINT_H */

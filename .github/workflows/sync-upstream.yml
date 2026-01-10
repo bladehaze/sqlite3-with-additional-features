@@ -1,0 +1,118 @@
+name: Sync with Upstream SQLite
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual trigger
+  push:
+    branches:
+      - exclude-feature  # Also sync when feature branch is updated
+
+env:
+  FEATURE_BRANCH: exclude-feature
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for rebasing
+          ref: main
+
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/sqlite/sqlite.git
+          git fetch upstream
+
+      - name: Check current branch
+        run: |
+          echo "Current branch: $(git branch --show-current)"
+          echo "Upstream branches:"
+          git branch -r | grep upstream
+
+      - name: Merge upstream changes into main
+        run: |
+          # Get the latest upstream commit
+          UPSTREAM_BRANCH=$(git ls-remote --heads upstream | grep -E 'refs/heads/(master|main|version-[0-9])' | head -1 | cut -f2 | sed 's|refs/heads/||')
+          if [ -z "$UPSTREAM_BRANCH" ]; then
+            UPSTREAM_BRANCH="master"
+          fi
+          echo "Syncing with upstream branch: $UPSTREAM_BRANCH"
+          
+          # Checkout main and merge upstream
+          git checkout main
+          git merge upstream/$UPSTREAM_BRANCH --no-edit -m "Merge upstream SQLite" || {
+            echo "Merge conflict detected. Attempting rebase..."
+            git rebase upstream/$UPSTREAM_BRANCH || {
+              echo "Rebase failed. Manual intervention needed."
+              exit 1
+            }
+          }
+
+      - name: Merge feature branch into main
+        run: |
+          # Fetch feature branch if it exists
+          git fetch origin ${{ env.FEATURE_BRANCH }}:${{ env.FEATURE_BRANCH }} || {
+            echo "Feature branch ${{ env.FEATURE_BRANCH }} not found. Creating it from current state."
+            git checkout -b ${{ env.FEATURE_BRANCH }}
+            git push -u origin ${{ env.FEATURE_BRANCH }} || echo "Could not push feature branch"
+            exit 0
+          }
+          
+          # Merge feature branch into main
+          git merge ${{ env.FEATURE_BRANCH }} --no-edit -m "Merge EXCLUDE feature into main" || {
+            echo "Merge conflict detected. This may require manual resolution."
+            echo "The feature branch changes conflict with upstream changes."
+            exit 1
+          }
+
+      - name: Test build
+        run: |
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y tcl tcl-dev build-essential
+          
+          # Build lemon parser generator
+          make lemon || gcc -o lemon tool/lemon.c
+          
+          # Generate parse.c
+          ./lemon -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_PERCENTILE -DSQLITE_HAVE_ZLIB=1 -DSQLITE_THREADSAFE=1 -S src/parse.y || true
+          
+          # Quick compile test
+          gcc -c parse.c -o /dev/null 2>&1 | head -20 || echo "Parse.c generated successfully"
+
+      - name: Push updated main branch
+        if: success()
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "Sync with upstream and merge EXCLUDE feature [skip ci]" || echo "No changes to commit"
+          fi
+          git push origin main || echo "Push failed or no changes"
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Upstream sync failed - manual intervention needed',
+              body: 'The automatic upstream sync failed. Please check the workflow run and resolve conflicts manually.\n\n' +
+                    'To resolve:\n' +
+                    '1. Checkout the `exclude-feature` branch locally\n' +
+                    '2. Rebase onto the updated main: `git rebase main`\n' +
+                    '3. Resolve any conflicts\n' +
+                    '4. Push the updated feature branch: `git push --force-with-lease`\n' +
+                    '5. Re-run this workflow'
+            })

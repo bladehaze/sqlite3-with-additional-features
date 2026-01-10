@@ -93,7 +93,7 @@ ifcapable json1 {
     ORDER BY json_extract(x, '$.b') COLLATE nocase;
   } [string map {"\n  " \n} {
     QUERY PLAN
-    |--SCAN TABLE t2
+    |--SCAN t2
     `--USE TEMP B-TREE FOR GROUP BY
   }]
   
@@ -108,7 +108,7 @@ ifcapable json1 {
     ORDER BY json_extract(x, '$.b') COLLATE nocase;
   } [string map {"\n  " \n} {
     QUERY PLAN
-    |--SEARCH TABLE t3 USING INDEX i3 (<expr>=?)
+    |--SEARCH t3 USING INDEX i3 (<expr>=?)
     `--USE TEMP B-TREE FOR GROUP BY
   }]
 }
@@ -154,7 +154,7 @@ do_execsql_test 3.4.5 {
 do_execsql_test 3.4.5eqp {
   EXPLAIN QUERY PLAN
   SELECT * FROM t4 ORDER BY Substr(a,-2) COLLATE nocase;
-} {/SCAN TABLE t4 USING INDEX i4/}
+} {/SCAN t4 USING INDEX i4/}
 do_execsql_test 3.4.6 {
   SELECT * FROM t4 ORDER BY Substr(a,-2) COLLATE binary;
 } {.ABC1 1 .ABC3 3 .abc2 2 .abc4 4}
@@ -265,7 +265,7 @@ do_execsql_test 6.1.2 {
 } {1 123   2 123   3 123abc  4 123.0}
 do_eqp_test 6.1.3 {
   SELECT a, b FROM x1 WHERE CAST(b AS INTEGER) = 123;
-} {SEARCH TABLE x1 USING INDEX x1i (<expr>=?)}
+} {SEARCH x1 USING INDEX x1i (<expr>=?)}
 
 do_execsql_test 6.2.1 {
   SELECT a, b FROM x1 WHERE CAST(b AS TEXT) = 123;
@@ -276,7 +276,7 @@ do_execsql_test 6.2.2 {
 } {1 123   2 123}
 do_eqp_test 6.2.3 {
   SELECT a, b FROM x1 WHERE CAST(b AS TEXT) = 123;
-} {SEARCH TABLE x1 USING INDEX x1i2 (<expr>=?)}
+} {SEARCH x1 USING INDEX x1i2 (<expr>=?)}
 
 do_execsql_test 7.0 {
   CREATE TABLE IF NOT EXISTS t0(c0);
@@ -371,5 +371,58 @@ foreach {tn expr} {
     SELECT ($expr) IS TRUE FROM t1 LEFT JOIN t2
   " {1 1}
 }
+
+# 2023-03-24 https://sqlite.org/forum/forumpost/79cf371080
+#
+reset_db
+do_execsql_test 9.0 {
+  CREATE TABLE t1(a INT, b INT);
+  CREATE INDEX t1x ON t1(a, abs(b));
+  CREATE TABLE t2(c INT, d INT);
+  INSERT INTO t1(a,b) VALUES(4,4),(5,-5),(5,20),(6,6);
+  INSERT INTO t2(c,d) VALUES(100,1),(200,1),(300,2);
+  SELECT *,
+    (SELECT max(c+abs(b)) FROM t2 GROUP BY d ORDER BY d LIMIT 1) AS subq
+   FROM t1 WHERE a=5;
+} {5 -5 205 5 20 220}
+
+# 2023-04-03 https://sqlite.org/forum/forumpost/44270909bb
+# and https://sqlite.org/forum/forumpost/e45108732c which are the
+# same problem, namely the failure to omit the EP_Collate property
+# from an expression node when changing it from TK_COLLATE into
+# TK_AGG_COLUMN because it resolves to an indexed expression.
+#
+reset_db
+do_execsql_test 10.0 {
+  CREATE TABLE t1(a INTEGER PRIMARY KEY, b TEXT);
+  CREATE INDEX t1x ON t1 (b, +b COLLATE NOCASE);
+  INSERT INTO t1(a,b) VALUES(1,'abcde');
+  SELECT * FROM t1 AS a0
+   WHERE (SELECT count(a0.b=+a0.b COLLATE NOCASE IN (b)) FROM t1 GROUP BY 2.5)
+   ORDER BY a0.b;
+} {1 abcde}
+do_execsql_test 10.1 {
+  CREATE TABLE t2(a TEXT);
+  INSERT INTO t2 VALUES('alice'),('bob'),('cindy'),('david');
+  CREATE INDEX t2x ON t2 (+a COLLATE NOCASE);
+  SELECT count(+a COLLATE NOCASE IN (SELECT 1)) AS x
+    FROM t2
+   GROUP BY SUBSTR(0,0);
+} 4
+
+# 2023-04-03 https://sqlite.org/forum/forumpost/409ebc7368
+# When a generated column appears in both an outer and an inner loop
+# (that is to say, the same table is used in both loops) and the
+# generated column is indexed and it is used inside an aggregate function,
+# make sure that the terms resolve to the correct aggregate.
+#
+do_execsql_test 11.0 {
+  CREATE TABLE t3 (a INT, b AS (-a));
+  CREATE INDEX t3x ON t3(b, a);
+  INSERT INTO t3(a) VALUES(44);
+  SELECT * FROM t3 AS a0
+   WHERE (SELECT sum(-a0.a=b) FROM t3 GROUP BY b)
+   GROUP BY b;
+} {44 -44}
 
 finish_test

@@ -15,7 +15,7 @@ set END   {^/\*+ End of %s \*+/}
 
 set in [open sqlite3.c]
 set out1 [open sqlite3-all.c w]
-fconfigure $out1 -translation lf
+fconfigure $out1 -translation binary
 
 # Copy the header from sqlite3.c into sqlite3-all.c
 #
@@ -48,8 +48,15 @@ set filecnt 0
 proc write_one_file {content} {
   global filecnt
   incr filecnt
-  set out [open sqlite3-$filecnt.c w]
-  fconfigure $out -translation lf
+  set label $filecnt
+  if {$filecnt>9} {
+    set label [string index ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop \
+                [expr {$filecnt-10}]]
+  } else {
+    set label $filecnt
+  }
+  set out [open sqlite3-$label.c w]
+  fconfigure $out -translation text
   puts -nonewline $out $content
   close $out
   puts $::out1 "#include \"sqlite3-$filecnt.c\""
@@ -74,6 +81,11 @@ while {[regexp $BEGIN $line]} {
   incr N $n
   while {[gets $in line]>=0} {
     if {[regexp $BEGIN $line]} break
+    if {$N>0} {
+      write_one_file $all
+      set N 0
+      set all {}
+    }
     puts $out1 $line
   }
 }

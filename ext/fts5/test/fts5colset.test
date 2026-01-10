@@ -79,8 +79,27 @@ foreach_detail_mode $::testprefix {
 
   do_catchsql_test 4.1 {
     SELECT * FROM t1 WHERE rowid MATCH 'a'
-  } {1 {unable to use function MATCH in the requested context}}
+  } {1 {no query solution}}
 }
+
+#-------------------------------------------------------------------------
+# Confirm that the expression parser creates the same expression tree
+# for:
+#
+#     {a b} : (abc AND def)
+#    -{c d} : (abc AND def)
+#
+# Assuming that the table columns are (a, b, c, d).
+#
+do_execsql_test 5.1 {
+  SELECT fts5_expr('abcd AND cdef');
+} {{"abcd" AND "cdef"}}
+do_execsql_test 5.2 {
+  SELECT fts5_expr('{a b} : (abcd AND cdef)', 'a', 'b', 'c', 'd');
+} {{{a b} : "abcd" AND {a b} : "cdef"}}
+do_execsql_test 5.3 {
+  SELECT fts5_expr('-{c d} : (abcd AND cdef)', 'a', 'b', 'c', 'd');
+} {{{a b} : "abcd" AND {a b} : "cdef"}}
 
 
 finish_test

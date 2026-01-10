@@ -477,7 +477,64 @@ static const sqlite3_api_routines sqlite3Apis = {
   /* Version 3.32.0 and later */
   sqlite3_create_filename,
   sqlite3_free_filename,
+  sqlite3_database_file_object,
+  /* Version 3.34.0 and later */
+  sqlite3_txn_state,
+  /* Version 3.36.1 and later */
+  sqlite3_changes64,
+  sqlite3_total_changes64,
+  /* Version 3.37.0 and later */
+  sqlite3_autovacuum_pages,
+  /* Version 3.38.0 and later */
+  sqlite3_error_offset,
+#ifndef SQLITE_OMIT_VIRTUALTABLE
+  sqlite3_vtab_rhs_value,
+  sqlite3_vtab_distinct,
+  sqlite3_vtab_in,
+  sqlite3_vtab_in_first,
+  sqlite3_vtab_in_next,
+#else
+  0,
+  0,
+  0,
+  0,
+  0,
+#endif
+  /* Version 3.39.0 and later */
+#ifndef SQLITE_OMIT_DESERIALIZE
+  sqlite3_deserialize,
+  sqlite3_serialize,
+#else
+  0,
+  0,
+#endif
+  sqlite3_db_name,
+  /* Version 3.40.0 and later */
+  sqlite3_value_encoding,
+  /* Version 3.41.0 and later */
+  sqlite3_is_interrupted,
+  /* Version 3.43.0 and later */
+  sqlite3_stmt_explain,
+  /* Version 3.44.0 and later */
+  sqlite3_get_clientdata,
+  sqlite3_set_clientdata,
+  /* Version 3.50.0 and later */
+  sqlite3_setlk_timeout,
+  /* Version 3.51.0 and later */
+  sqlite3_set_errmsg,
+  sqlite3_db_status64,
+  /* Version 3.52.0 and later */
+  sqlite3_str_truncate,
+  sqlite3_str_free
 };
+
+/* True if x is the directory separator character
+*/
+#if SQLITE_OS_WIN
+# define DirSep(X)  ((X)=='/'||(X)=='\\')
+#else
+# define DirSep(X)  ((X)=='/')
+#endif
 
 /*
 ** Attempt to load an SQLite extension library contained in the file
@@ -504,7 +561,7 @@ static int sqlite3LoadExtension(
   const char *zEntry;
   char *zAltEntry = 0;
   void **aHandle;
-  u64 nMsg = 300 + sqlite3Strlen30(zFile);
+  u64 nMsg = strlen(zFile);
   int ii;
   int rc;
 
@@ -538,66 +595,82 @@ static int sqlite3LoadExtension(
 
   zEntry = zProc ? zProc : "sqlite3_extension_init";
 
+  /* tag-20210611-1.  Some dlopen() implementations will segfault if given
+  ** an oversize filename.  Most filesystems have a pathname limit of 4K,
+  ** so limit the extension filename length to about twice that.
+  ** https://sqlite.org/forum/forumpost/08a0d6d9bf
+  **
+  ** Later (2023-03-25): Save an extra 6 bytes for the filename suffix.
+  ** See https://sqlite.org/forum/forumpost/24083b579d.
+  */
+  if( nMsg>SQLITE_MAX_PATHLEN ) goto extension_not_found;
+
+  /* Do not allow sqlite3_load_extension() to link to a copy of the
+  ** running application, by passing in an empty filename. */
+  if( nMsg==0 ) goto extension_not_found;
+    
   handle = sqlite3OsDlOpen(pVfs, zFile);
 #if SQLITE_OS_UNIX || SQLITE_OS_WIN
   for(ii=0; ii<ArraySize(azEndings) && handle==0; ii++){
     char *zAltFile = sqlite3_mprintf("%s.%s", zFile, azEndings[ii]);
     if( zAltFile==0 ) return SQLITE_NOMEM_BKPT;
-    handle = sqlite3OsDlOpen(pVfs, zAltFile);
+    if( nMsg+strlen(azEndings[ii])+1<=SQLITE_MAX_PATHLEN ){
+      handle = sqlite3OsDlOpen(pVfs, zAltFile);
+    }
     sqlite3_free(zAltFile);
   }
 #endif
-  if( handle==0 ){
-    if( pzErrMsg ){
-      *pzErrMsg = zErrmsg = sqlite3_malloc64(nMsg);
-      if( zErrmsg ){
-        sqlite3_snprintf(nMsg, zErrmsg, 
-            "unable to open shared library [%s]", zFile);
-        sqlite3OsDlError(pVfs, nMsg-1, zErrmsg);
-      }
-    }
-    return SQLITE_ERROR;
-  }
+  if( handle==0 ) goto extension_not_found;
   xInit = (sqlite3_loadext_entry)sqlite3OsDlSym(pVfs, handle, zEntry);
 
   /* If no entry point was specified and the default legacy
   ** entry point name "sqlite3_extension_init" was not found, then
   ** construct an entry point name "sqlite3_X_init" where the X is
   ** replaced by the lowercase value of every ASCII alphabetic 
-  ** character in the filename after the last "/" upto the first ".",
-  ** and eliding the first three characters if they are "lib".  
+  ** character in the filename after the last "/" up to the first ".",
+  ** and skipping the first three characters if they are "lib".  
   ** Examples:
   **
   **    /usr/local/lib/libExample5.4.3.so ==>  sqlite3_example_init
   **    C:/lib/mathfuncs.dll              ==>  sqlite3_mathfuncs_init
+  **
+  ** If that still finds no entry point, repeat a second time but this
+  ** time include both alphabetic and numeric characters up to the first
+  ** ".".  Example:
+  **
+  **    /usr/local/lib/libExample5.4.3.so ==>  sqlite3_example5_init
   */
   if( xInit==0 && zProc==0 ){
     int iFile, iEntry, c;
     int ncFile = sqlite3Strlen30(zFile);
+    int cnt = 0;
     zAltEntry = sqlite3_malloc64(ncFile+30);
     if( zAltEntry==0 ){
       sqlite3OsDlClose(pVfs, handle);
       return SQLITE_NOMEM_BKPT;
     }
-    memcpy(zAltEntry, "sqlite3_", 8);
-    for(iFile=ncFile-1; iFile>=0 && zFile[iFile]!='/'; iFile--){}
-    iFile++;
-    if( sqlite3_strnicmp(zFile+iFile, "lib", 3)==0 ) iFile += 3;
-    for(iEntry=8; (c = zFile[iFile])!=0 && c!='.'; iFile++){
-      if( sqlite3Isalpha(c) ){
-        zAltEntry[iEntry++] = (char)sqlite3UpperToLower[(unsigned)c];
+    do{
+      memcpy(zAltEntry, "sqlite3_", 8);
+      for(iFile=ncFile-1; iFile>=0 && !DirSep(zFile[iFile]); iFile--){}
+      iFile++;
+      if( sqlite3_strnicmp(zFile+iFile, "lib", 3)==0 ) iFile += 3;
+      for(iEntry=8; (c = zFile[iFile])!=0 && c!='.'; iFile++){
+        if( sqlite3Isalpha(c) || (cnt && sqlite3Isdigit(c)) ){
+          zAltEntry[iEntry++] = (char)sqlite3UpperToLower[(unsigned)c];
+        }
       }
-    }
-    memcpy(zAltEntry+iEntry, "_init", 6);
-    zEntry = zAltEntry;
-    xInit = (sqlite3_loadext_entry)sqlite3OsDlSym(pVfs, handle, zEntry);
+      memcpy(zAltEntry+iEntry, "_init", 6);
+      zEntry = zAltEntry;
+      xInit = (sqlite3_loadext_entry)sqlite3OsDlSym(pVfs, handle, zEntry);
+    }while( xInit==0 && (++cnt)<2 );
   }
   if( xInit==0 ){
     if( pzErrMsg ){
-      nMsg += sqlite3Strlen30(zEntry);
+      nMsg += strlen(zEntry) + 300;
       *pzErrMsg = zErrmsg = sqlite3_malloc64(nMsg);
       if( zErrmsg ){
-        sqlite3_snprintf(nMsg, zErrmsg,
+        assert( nMsg<0x7fffffff );  /* zErrmsg would be NULL if not so */
+        sqlite3_snprintf((int)nMsg, zErrmsg,
             "no entry point [%s] in shared library [%s]", zEntry, zFile);
         sqlite3OsDlError(pVfs, nMsg-1, zErrmsg);
       }
@@ -631,6 +704,19 @@ static int sqlite3LoadExtension(
 
   db->aExtension[db->nExtension++] = handle;
   return SQLITE_OK;
+
+extension_not_found:
+  if( pzErrMsg ){
+    nMsg += 300;
+    *pzErrMsg = zErrmsg = sqlite3_malloc64(nMsg);
+    if( zErrmsg ){
+      assert( nMsg<0x7fffffff );  /* zErrmsg would be NULL if not so */
+      sqlite3_snprintf((int)nMsg, zErrmsg,
+          "unable to open shared library [%.*s]", SQLITE_MAX_PATHLEN, zFile);
+      sqlite3OsDlError(pVfs, nMsg-1, zErrmsg);
+    }
+  }
+  return SQLITE_ERROR;
 }
 int sqlite3_load_extension(
   sqlite3 *db,          /* Load the extension into this database connection */
@@ -664,6 +750,9 @@ void sqlite3CloseExtensions(sqlite3 *db){
 ** default so as not to open security holes in older applications.
 */
 int sqlite3_enable_load_extension(sqlite3 *db, int onoff){
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( !sqlite3SafetyCheckOk(db) ) return SQLITE_MISUSE_BKPT;
+#endif
   sqlite3_mutex_enter(db->mutex);
   if( onoff ){
     db->flags |= SQLITE_LoadExtension|SQLITE_LoadExtFunc;
@@ -680,12 +769,12 @@ int sqlite3_enable_load_extension(sqlite3 *db, int onoff){
 ** The following object holds the list of automatically loaded
 ** extensions.
 **
-** This list is shared across threads.  The SQLITE_MUTEX_STATIC_MASTER
+** This list is shared across threads.  The SQLITE_MUTEX_STATIC_MAIN
 ** mutex must be held while accessing this list.
 */
 typedef struct sqlite3AutoExtList sqlite3AutoExtList;
 static SQLITE_WSD struct sqlite3AutoExtList {
-  u32 nExt;              /* Number of entries in aExt[] */          
+  u32 nExt;              /* Number of entries in aExt[] */
   void (**aExt)(void);   /* Pointers to the extension init functions */
 } sqlite3Autoext = { 0, 0 };
 
@@ -713,6 +802,9 @@ int sqlite3_auto_extension(
   void (*xInit)(void)
 ){
   int rc = SQLITE_OK;
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( xInit==0 ) return SQLITE_MISUSE_BKPT;
+#endif
 #ifndef SQLITE_OMIT_AUTOINIT
   rc = sqlite3_initialize();
   if( rc ){
@@ -722,7 +814,7 @@ int sqlite3_auto_extension(
   {
     u32 i;
 #if SQLITE_THREADSAFE
-    sqlite3_mutex *mutex = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MASTER);
+    sqlite3_mutex *mutex = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MAIN);
 #endif
     wsdAutoextInit;
     sqlite3_mutex_enter(mutex);
@@ -760,11 +852,14 @@ int sqlite3_cancel_auto_extension(
   void (*xInit)(void)
 ){
 #if SQLITE_THREADSAFE
-  sqlite3_mutex *mutex = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MASTER);
+  sqlite3_mutex *mutex = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MAIN);
 #endif
   int i;
   int n = 0;
   wsdAutoextInit;
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( xInit==0 ) return 0;
+#endif
   sqlite3_mutex_enter(mutex);
   for(i=(int)wsdAutoext.nExt-1; i>=0; i--){
     if( wsdAutoext.aExt[i]==xInit ){
@@ -787,7 +882,7 @@ void sqlite3_reset_auto_extension(void){
 #endif
   {
 #if SQLITE_THREADSAFE
-    sqlite3_mutex *mutex = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MASTER);
+    sqlite3_mutex *mutex = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MAIN);
 #endif
     wsdAutoextInit;
     sqlite3_mutex_enter(mutex);
@@ -817,7 +912,7 @@ void sqlite3AutoLoadExtensions(sqlite3 *db){
   for(i=0; go; i++){
     char *zErrmsg;
 #if SQLITE_THREADSAFE
-    sqlite3_mutex *mutex = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MASTER);
+    sqlite3_mutex *mutex = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MAIN);
 #endif
 #ifdef SQLITE_OMIT_LOAD_EXTENSION
     const sqlite3_api_routines *pThunk = 0;

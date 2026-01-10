@@ -16,6 +16,7 @@
 
 set testdir [file dirname $argv0]
 source $testdir/tester.tcl
+set testprefix sqllimits1
 
 # Verify that the default per-connection limits are the same as
 # the compile-time hard limits.
@@ -73,6 +74,13 @@ do_test sqllimits1-1.22 {
 do_test sqllimits1-1.23 {
   sqlite3_limit db SQLITE_LIMIT_TOOBIG 123
 } {-1}
+
+# Minimum value for SQLITE_LIMIT_LENGTH is 30
+#
+do_test sqllimits1-1.30 {
+  set prior [sqlite3_limit db SQLITE_LIMIT_LENGTH 1]
+  sqlite3_limit db SQLITE_LIMIT_LENGTH $prior
+} 30
 
 
 # Decrease all limits by half.  Verify that the new limits take.
@@ -293,8 +301,14 @@ do_test sqllimits1-5.9 {
 } {1 {string or blob too big}}
 
 do_test sqllimits1-5.10 {
-  set ::str [string repeat %J 2100]
-  catchsql { SELECT strftime($::str, '2003-10-31') }
+  # Prior to 3.37.0 strftime() allocated a large static buffer into
+  # which to format its output. Using that strategy, 2100 repeats was
+  # enough to exceed 100KiB and provoke the error. As of 3.37.0 strftime()
+  # uses the StrAccum functions, so it requires 12100 to fail.
+  #
+  # set ::str [string repeat %J 2100]
+  set ::str [string repeat %J 12100]
+  catchsql { SELECT length(strftime($::str, '2003-10-31')) }
 } {1 {string or blob too big}}
 
 do_test sqllimits1-5.11 {
@@ -341,7 +355,7 @@ do_test sqllimits1-5.14.6 {
 } {SQLITE_TOOBIG}
 ifcapable utf16 {
   do_test sqllimits1-5.14.7 {
-    catch {sqlite3_bind_text16 $::STMT 1 $::str1 $np1} res
+    catch {sqlite3_bind_text16 $::STMT 1 $::str1 [expr $np1+1]} res
     set res
   } {SQLITE_TOOBIG}
 }
@@ -372,7 +386,7 @@ db eval {DROP TABLE t4}
 sqlite3_limit db SQLITE_LIMIT_SQL_LENGTH 0x7fffffff
 set strvalue [string repeat A $::SQLITE_LIMIT_LENGTH]
 do_test sqllimits1-5.16 {
-  catchsql "SELECT '$strvalue'"
+  catchsql "SELECT '$strvalue' AS x"
 } [list 0 $strvalue]
 do_test sqllimits1-5.17.1 {
   catchsql "SELECT 'A$strvalue'"
@@ -387,7 +401,7 @@ do_test sqllimits1-5.17.3 {
 } [list 1 {string or blob too big}]
 set blobvalue [string repeat 41 $::SQLITE_LIMIT_LENGTH]
 do_test sqllimits1-5.18 {
-  catchsql "SELECT x'$blobvalue'"
+  catchsql "SELECT x'$blobvalue' AS x"
 } [list 0 $strvalue]
 do_test sqllimits1-5.19 {
   catchsql "SELECT '41$blobvalue'"
@@ -395,7 +409,7 @@ do_test sqllimits1-5.19 {
 unset blobvalue
 
 ifcapable datetime {
-  set strvalue [string repeat D [expr {$SQLITE_LIMIT_LENGTH-12}]]
+  set strvalue [string repeat D [expr {$SQLITE_LIMIT_LENGTH-11}]]
   do_test sqllimits1-5.20 {
     catchsql {SELECT strftime('%Y ' || $::strvalue, '2008-01-02')}
   } [list 0 [list "2008 $strvalue"]]
@@ -700,6 +714,7 @@ if {$SQLITE_MAX_EXPR_DEPTH==0} {
     }]
   } "1 {Expression tree is too large (maximum depth $::SQLITE_MAX_EXPR_DEPTH)}"
   
+if 0 {  
   # Attempting to beat the expression depth limit using nested SELECT
   # queries causes a parser stack overflow. 
   do_test sqllimits1-9.2 {
@@ -711,7 +726,6 @@ if {$SQLITE_MAX_EXPR_DEPTH==0} {
     catchsql [subst { $expr }]
   } "1 {parser stack overflow}"
   
-if 0 {  
   do_test sqllimits1-9.3 {
     execsql {
       PRAGMA max_page_count = 1000000;  -- 1 GB
@@ -863,16 +877,21 @@ do_test sqllimits1-15.2 {
 # This test case doesn't really belong with the other limits tests.
 # It is in this file because it is taxing to run, like the limits tests.
 #
-do_test sqllimits1-16.1 {
-  set ::N [expr int(([expr pow(2,32)]/50) + 1)]
-  expr (($::N*50) & 0xffffffff)<55
-} {1}
-do_test sqllimits1-16.2 {
-  set ::format "[string repeat A 60][string repeat "%J" $::N]"
-  catchsql {
-    SELECT strftime($::format, 1);
-  }
-} {1 {string or blob too big}}
+# Update for 3.37.0: strftime() used to allocate a large static buffer
+# into which it would write its result. With that implementation, the
+# following would trigger an SQLITE_TOOBIG error. But strftime() now
+# uses the StrAccum functions, causing this test to fail.
+#
+#do_test sqllimits1-16.1 {
+#  set ::N [expr int(([expr pow(2,32)]/50) + 1)]
+#  expr (($::N*50) & 0xffffffff)<55
+#} {1}
+#do_test sqllimits1-16.2 {
+#  set ::format "[string repeat A 60][string repeat "%J" $::N]"
+#  catchsql {
+#    SELECT strftime($::format, 1);
+#  }
+#} {1 {string or blob too big}}
 
 do_catchsql_test sqllimits1.17.0 {
   SELECT *,*,*,*,*,*,*,* FROM (
@@ -898,5 +917,69 @@ set nm [string repeat x 10000]
 do_catchsql_test sqllimits1-17.1 "
   CREATE TABLE $nm (x PRIMARY KEY)
 " {1 {string or blob too big}}
+
+#-------------------------------------------------------------------------
+#
+sqlite3_limit db SQLITE_LIMIT_COMPOUND_SELECT 10
+do_catchsql_test sqllimits1-18.1 {
+  CREATE TABLE b1(x);
+  INSERT INTO b1 VALUES(1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11);
+} {0 {}}
+
+do_catchsql_test sqllimits1-18.2 {
+  INSERT INTO b1 VALUES(1), (2), (3), (4), (5), (6), (7), (8), (9), (10)
+    UNION VALUES(11);
+} {0 {}}
+
+#-------------------------------------------------------------------------
+#
+reset_db
+ifcapable utf16 {
+  do_execsql_test 19.0 {
+    PRAGMA encoding = 'utf16';
+  }
+  set bigstr [string repeat abcdefghij 5000]
+  set bigstr16 [encoding convertto unicode $bigstr]
+
+  do_test 19.1 {
+    string length $bigstr16
+  } {100000}
+
+  do_test 19.2 {
+    set ::stmt [sqlite3_prepare db "SELECT length( ? )" -1 TAIL]
+    sqlite3_bind_text16 $::stmt 1 $bigstr16 100000
+    sqlite3_step $::stmt
+    set val [sqlite3_column_int $::stmt 0]
+    sqlite3_finalize $::stmt
+    set val
+  } {50000}
+
+  sqlite3_limit db SQLITE_LIMIT_LENGTH 100000
+
+  do_test 19.3 {
+    set ::stmt [sqlite3_prepare db "SELECT length( ? )" -1 TAIL]
+    sqlite3_bind_text16 $::stmt 1 $bigstr16 100000
+    sqlite3_step $::stmt
+    set val [sqlite3_column_int $::stmt 0]
+    sqlite3_finalize $::stmt
+    set val
+  } {50000}
+
+  sqlite3_limit db SQLITE_LIMIT_LENGTH 99999
+
+  do_test 19.4 {
+    set ::stmt [sqlite3_prepare db "SELECT length( ? )" -1 TAIL]
+    list [catch { sqlite3_bind_text16 $::stmt 1 $bigstr16 100000 } msg] $msg
+  } {1 SQLITE_TOOBIG}
+  sqlite3_finalize $::stmt
+
+  sqlite3_limit db SQLITE_LIMIT_LENGTH 100000
+
+  do_test 19.5 {
+    set ::stmt [sqlite3_prepare db "SELECT length( ? )" -1 TAIL]
+    list [catch { sqlite3_bind_text16 $::stmt 1 $bigstr16 100002 } msg] $msg
+  } {1 SQLITE_TOOBIG}
+  sqlite3_finalize $::stmt
+}
 
 finish_test

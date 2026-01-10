@@ -16,7 +16,7 @@ proc is_without_rowid {tname} {
   db eval "PRAGMA index_list = '$t'" o {
     if {$o(origin) == "pk"} {
       set n $o(name)
-      if {0==[db one { SELECT count(*) FROM sqlite_master WHERE name=$n }]} {
+      if {0==[db one { SELECT count(*) FROM sqlite_schema WHERE name=$n }]} {
         return 1
       }
     }
@@ -74,6 +74,16 @@ Options:
 }
   exit 1
 }
+
+# Exit with given code, but first close db if open.
+#
+proc exit_clean {exit_code} {
+  if {0 < [llength [info commands db]]} {
+    db close
+  }
+  exit $exit_code
+}
+
 set file_to_analyze {}
 set flags(-pageinfo) 0
 set flags(-stats) 0
@@ -157,10 +167,10 @@ if {![db exists {SELECT 1 FROM pragma_compile_options
         lacks required capabilities. Recompile using the\
         -DSQLITE_ENABLE_DBSTAT_VTAB compile-time option to fix\
         this problem."
-  exit 1
+  exit_clean 1
 }
 
-db eval {SELECT count(*) FROM sqlite_master}
+db eval {SELECT count(*) FROM sqlite_schema}
 set pageSize [expr {wide([db one {PRAGMA page_size}])}]
 
 if {$flags(-pageinfo)} {
@@ -168,7 +178,7 @@ if {$flags(-pageinfo)} {
   db eval {SELECT name, path, pageno FROM temp.stat ORDER BY pageno} {
     puts "$pageno $name $path"
   }
-  exit 0
+  exit_clean 0
 }
 if {$flags(-stats)} {
   db eval {CREATE VIRTUAL TABLE temp.stat USING dbstat}
@@ -198,7 +208,7 @@ if {$flags(-stats)} {
     puts "INSERT INTO stats VALUES($x);"
   }
   puts "COMMIT;"
-  exit 0
+  exit_clean 0
 }
 
 
@@ -245,8 +255,8 @@ db eval {DROP TABLE temp.stat}
 set isCompressed 0
 set compressOverhead 0
 set depth 0
-set sql { SELECT name, tbl_name FROM sqlite_master WHERE rootpage>0 }
-foreach {name tblname} [concat sqlite_master sqlite_master [db eval $sql]] {
+set sql { SELECT name, tbl_name FROM sqlite_schema WHERE rootpage>0 }
+foreach {name tblname} [concat sqlite_schema sqlite_schema [db eval $sql]] {
 
   set is_index [expr {$name!=$tblname}]
   set is_without_rowid [is_without_rowid $name]
@@ -560,7 +570,7 @@ proc autovacuum_overhead {filePages pageSize} {
 # nautoindex:    Number of indices created automatically.
 # nmanindex:     Number of indices created manually.
 # user_payload:  Number of bytes of payload in table btrees 
-#                (not including sqlite_master)
+#                (not including sqlite_schema)
 # user_percent:  $user_payload as a percentage of total file size.
 
 ### The following, setting $file_bytes based on the actual size of the file
@@ -581,21 +591,26 @@ set inuse_pgcnt   [expr wide([mem eval $sql])]
 set inuse_percent [percent $inuse_pgcnt $file_pgcnt]
 
 set free_pgcnt    [expr {$file_pgcnt-$inuse_pgcnt-$av_pgcnt}]
+if {$file_bytes>1073741824 && $free_pgcnt>0} {incr free_pgcnt -1}
 set free_percent  [percent $free_pgcnt $file_pgcnt]
 set free_pgcnt2   [db one {PRAGMA freelist_count}]
 set free_percent2 [percent $free_pgcnt2 $file_pgcnt]
 
 set file_pgcnt2 [expr {$inuse_pgcnt+$free_pgcnt2+$av_pgcnt}]
 
-set ntable [db eval {SELECT count(*)+1 FROM sqlite_master WHERE type='table'}]
-set nindex [db eval {SELECT count(*) FROM sqlite_master WHERE type='index'}]
-set sql {SELECT count(*) FROM sqlite_master WHERE name LIKE 'sqlite_autoindex%'}
+# Account for the lockbyte page
+if {$file_pgcnt2*$pageSize>1073742335} {incr file_pgcnt2}
+
+set ntable [db eval {SELECT count(*)+1 FROM sqlite_schema WHERE type='table'}]
+set nindex [db eval {SELECT count(*) FROM sqlite_schema WHERE type='index'}]
+set sql {SELECT count(*) FROM sqlite_schema WHERE name LIKE 'sqlite_autoindex%'}
 set nautoindex [db eval $sql]
 set nmanindex [expr {$nindex-$nautoindex}]
+set nwithoutrowid [db eval {SELECT count(*) FROM pragma_table_list WHERE wr}]
 
 # set total_payload [mem eval "SELECT sum(payload) FROM space_used"]
 set user_payload [mem one {SELECT int(sum(payload)) FROM space_used
-     WHERE NOT is_index AND name NOT LIKE 'sqlite_master'}]
+     WHERE NOT is_index AND name NOT LIKE 'sqlite_schema'}]
 set user_percent [percent $user_payload $file_bytes]
 
 # Output the summary statistics calculated above.
@@ -610,6 +625,7 @@ statline {Pages on the freelist (per header)} $free_pgcnt2 $free_percent2
 statline {Pages on the freelist (calculated)} $free_pgcnt $free_percent
 statline {Pages of auto-vacuum overhead} $av_pgcnt $av_percent
 statline {Number of tables in the database} $ntable
+statline {Number of WITHOUT ROWID tables} $nwithoutrowid
 statline {Number of indices} $nindex
 statline {Number of defined indices} $nmanindex
 statline {Number of implied indices} $nautoindex
@@ -668,6 +684,14 @@ if {$nindex>0} {
   subreport {All tables and indices} 1 0
 }
 subreport {All tables} {NOT is_index} 0
+if {$nwithoutrowid>0} {
+  subreport {All WITHOUT ROWID tables} {is_without_rowid} 0
+  set nrowidtab [db eval {SELECT count(*) FROM pragma_table_list
+                         WHERE type='table' AND NOT wr}]
+  if {$nrowidtab>0} {
+     subreport {ALL rowid tables} {NOT is_without_rowid AND NOT is_index} 0
+  }
+}
 if {$nindex>0} {
   subreport {All indices} {is_index} 0
 }
@@ -728,7 +752,7 @@ Pages of auto-vacuum overhead
 
 Number of tables in the database
 
-    The number of tables in the database, including the SQLITE_MASTER table
+    The number of tables in the database, including the SQLITE_SCHEMA table
     used to store schema information.
 
 Number of indices
@@ -751,7 +775,7 @@ Size of the file in bytes
 Bytes of user payload stored
 
     The total number of bytes of user payload stored in the database. The
-    schema information in the SQLITE_MASTER table is not counted when
+    schema information in the SQLITE_SCHEMA table is not counted when
     computing this number.  The percentage at the right shows the payload
     divided by the total file size.
 
@@ -887,5 +911,7 @@ puts "COMMIT;"
 } err]} {
   puts "ERROR: $err"
   puts $errorInfo
-  exit 1
+  exit_clean 1
 }
+
+exit_clean 0
