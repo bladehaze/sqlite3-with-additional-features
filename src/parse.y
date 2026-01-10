@@ -261,7 +261,7 @@ columnname(A) ::= nm(A) typetoken(Y). {sqlite3AddColumn(pParse,A,Y);}
 // Various assert() statements throughout the code enforce these restrictions.
 //
 %token ABORT ACTION AFTER ANALYZE ASC ATTACH BEFORE BEGIN BY CASCADE CAST.
-%token CONFLICT DATABASE DEFERRED DESC DETACH EACH END EXCLUSIVE EXPLAIN FAIL.
+%token CONFLICT DATABASE DEFERRED DESC DETACH EACH END EXCLUSIVE EXCLUDE EXPLAIN FAIL.
 %token OR AND NOT IS ISNOT MATCH LIKE_KW BETWEEN IN ISNULL NOTNULL NE EQ.
 %token GT LE LT GE ESCAPE.
 
@@ -714,15 +714,34 @@ selcollist(A) ::= sclp(A) scanpt(B) expr(X) scanpt(Z) as(Y).     {
    if( Y.n>0 ) sqlite3ExprListSetName(pParse, A, &Y, 1);
    sqlite3ExprListSetSpan(pParse,A,B,Z);
 }
+
 selcollist(A) ::= sclp(A) scanpt STAR(X). {
   Expr *p = sqlite3Expr(pParse->db, TK_ASTERISK, 0);
   sqlite3ExprSetErrorOffset(p, (int)(X.z - pParse->zTail));
+  A = sqlite3ExprListAppend(pParse, A, p);
+}
+selcollist(A) ::= sclp(A) scanpt STAR(X) EXCLUDE LP idlist(E) RP. {
+  Expr *p = sqlite3Expr(pParse->db, TK_ASTERISK, 0);
+  sqlite3ExprSetErrorOffset(p, (int)(X.z - pParse->zTail));
+  /* Store the exclude list in x.pList by casting IdList* to ExprList* */
+  /* This is safe because we only use it for TK_ASTERISK and check before use */
+  p->x.pList = (ExprList*)E;
   A = sqlite3ExprListAppend(pParse, A, p);
 }
 selcollist(A) ::= sclp(A) scanpt nm(X) DOT STAR(Y). {
   Expr *pRight, *pLeft, *pDot;
   pRight = sqlite3PExpr(pParse, TK_ASTERISK, 0, 0);
   sqlite3ExprSetErrorOffset(pRight, (int)(Y.z - pParse->zTail));
+  pLeft = tokenExpr(pParse, TK_ID, X);
+  pDot = sqlite3PExpr(pParse, TK_DOT, pLeft, pRight);
+  A = sqlite3ExprListAppend(pParse,A, pDot);
+}
+selcollist(A) ::= sclp(A) scanpt nm(X) DOT STAR(Y) EXCLUDE LP idlist(E) RP. {
+  Expr *pRight, *pLeft, *pDot;
+  pRight = sqlite3PExpr(pParse, TK_ASTERISK, 0, 0);
+  sqlite3ExprSetErrorOffset(pRight, (int)(Y.z - pParse->zTail));
+  /* Store the exclude list in x.pList by casting IdList* to ExprList* */
+  pRight->x.pList = (ExprList*)E;
   pLeft = tokenExpr(pParse, TK_ID, X);
   pDot = sqlite3PExpr(pParse, TK_DOT, pLeft, pRight);
   A = sqlite3ExprListAppend(pParse,A, pDot);

@@ -6332,6 +6332,15 @@ static int selectExpander(Walker *pWalker, Select *p){
             pUsing = 0;
           }
 
+          /* Check if this asterisk has an EXCLUDE clause */
+          IdList *pExclude = 0;
+          if( pE->op==TK_ASTERISK && pE->x.pList ){
+            pExclude = (IdList*)pE->x.pList;
+          }else if( pE->op==TK_DOT && pE->pRight && pE->pRight->op==TK_ASTERISK 
+                   && pE->pRight->x.pList ){
+            pExclude = (IdList*)pE->pRight->x.pList;
+          }
+
           nAdd = pTab->nCol;
           if( VisibleRowid(pTab) && (selFlags & SF_NestedFrom)!=0 ) nAdd++;
           for(j=0; j<nAdd; j++){
@@ -6341,8 +6350,17 @@ static int selectExpander(Walker *pWalker, Select *p){
             if( j==pTab->nCol ){
               zName = sqlite3RowidAlias(pTab);
               if( zName==0 ) continue;
+              /* Skip rowid if it's in the EXCLUDE list */
+              if( pExclude && sqlite3IdListIndex(pExclude, zName)>=0 ){
+                continue;
+              }
             }else{
               zName = pTab->aCol[j].zCnName;
+
+              /* Skip columns in the EXCLUDE list */
+              if( pExclude && sqlite3IdListIndex(pExclude, zName)>=0 ){
+                continue;
+              }
 
               /* If pTab is actually an SF_NestedFrom sub-select, do not
               ** expand any ENAME_ROWID columns.  */

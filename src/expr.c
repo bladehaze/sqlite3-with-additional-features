@@ -1410,7 +1410,12 @@ exprDeleteRestart:
       assert( !ExprHasProperty(p, EP_WinFunc) );
       sqlite3SelectDelete(db, p->x.pSelect);
     }else{
-      sqlite3ExprListDelete(db, p->x.pList);
+      /* For TK_ASTERISK, x.pList may contain an IdList (EXCLUDE clause) */
+      if( p->op==TK_ASTERISK && p->x.pList ){
+        sqlite3IdListDelete(db, (IdList*)p->x.pList);
+      }else{
+        sqlite3ExprListDelete(db, p->x.pList);
+      }
 #ifndef SQLITE_OMIT_WINDOWFUNC
       if( ExprHasProperty(p, EP_WinFunc) ){
         sqlite3WindowDelete(db, p->y.pWin);
