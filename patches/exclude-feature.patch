@@ -1,0 +1,108 @@
+diff --git a/src/expr.c b/src/expr.c
+index 198467deac..58e119574b 100644
+--- a/src/expr.c
++++ b/src/expr.c
+@@ -1410,7 +1410,12 @@ exprDeleteRestart:
+       assert( !ExprHasProperty(p, EP_WinFunc) );
+       sqlite3SelectDelete(db, p->x.pSelect);
+     }else{
+-      sqlite3ExprListDelete(db, p->x.pList);
++      /* For TK_ASTERISK, x.pList may contain an IdList (EXCLUDE clause) */
++      if( p->op==TK_ASTERISK && p->x.pList ){
++        sqlite3IdListDelete(db, (IdList*)p->x.pList);
++      }else{
++        sqlite3ExprListDelete(db, p->x.pList);
++      }
+ #ifndef SQLITE_OMIT_WINDOWFUNC
+       if( ExprHasProperty(p, EP_WinFunc) ){
+         sqlite3WindowDelete(db, p->y.pWin);
+diff --git a/src/parse.y b/src/parse.y
+index cbcc9b43ae..a42a304439 100644
+--- a/src/parse.y
++++ b/src/parse.y
+@@ -261,7 +261,7 @@ columnname(A) ::= nm(A) typetoken(Y). {sqlite3AddColumn(pParse,A,Y);}
+ // Various assert() statements throughout the code enforce these restrictions.
+ //
+ %token ABORT ACTION AFTER ANALYZE ASC ATTACH BEFORE BEGIN BY CASCADE CAST.
+-%token CONFLICT DATABASE DEFERRED DESC DETACH EACH END EXCLUSIVE EXPLAIN FAIL.
++%token CONFLICT DATABASE DEFERRED DESC DETACH EACH END EXCLUSIVE EXCLUDE EXPLAIN FAIL.
+ %token OR AND NOT IS ISNOT MATCH LIKE_KW BETWEEN IN ISNULL NOTNULL NE EQ.
+ %token GT LE LT GE ESCAPE.
+ 
+@@ -714,11 +714,20 @@ selcollist(A) ::= sclp(A) scanpt(B) expr(X) scanpt(Z) as(Y).     {
+    if( Y.n>0 ) sqlite3ExprListSetName(pParse, A, &Y, 1);
+    sqlite3ExprListSetSpan(pParse,A,B,Z);
+ }
++
+ selcollist(A) ::= sclp(A) scanpt STAR(X). {
+   Expr *p = sqlite3Expr(pParse->db, TK_ASTERISK, 0);
+   sqlite3ExprSetErrorOffset(p, (int)(X.z - pParse->zTail));
+   A = sqlite3ExprListAppend(pParse, A, p);
+ }
++selcollist(A) ::= sclp(A) scanpt STAR(X) EXCLUDE LP idlist(E) RP. {
++  Expr *p = sqlite3Expr(pParse->db, TK_ASTERISK, 0);
++  sqlite3ExprSetErrorOffset(p, (int)(X.z - pParse->zTail));
++  /* Store the exclude list in x.pList by casting IdList* to ExprList* */
++  /* This is safe because we only use it for TK_ASTERISK and check before use */
++  p->x.pList = (ExprList*)E;
++  A = sqlite3ExprListAppend(pParse, A, p);
++}
+ selcollist(A) ::= sclp(A) scanpt nm(X) DOT STAR(Y). {
+   Expr *pRight, *pLeft, *pDot;
+   pRight = sqlite3PExpr(pParse, TK_ASTERISK, 0, 0);
+@@ -727,6 +736,16 @@ selcollist(A) ::= sclp(A) scanpt nm(X) DOT STAR(Y). {
+   pDot = sqlite3PExpr(pParse, TK_DOT, pLeft, pRight);
+   A = sqlite3ExprListAppend(pParse,A, pDot);
+ }
++selcollist(A) ::= sclp(A) scanpt nm(X) DOT STAR(Y) EXCLUDE LP idlist(E) RP. {
++  Expr *pRight, *pLeft, *pDot;
++  pRight = sqlite3PExpr(pParse, TK_ASTERISK, 0, 0);
++  sqlite3ExprSetErrorOffset(pRight, (int)(Y.z - pParse->zTail));
++  /* Store the exclude list in x.pList by casting IdList* to ExprList* */
++  pRight->x.pList = (ExprList*)E;
++  pLeft = tokenExpr(pParse, TK_ID, X);
++  pDot = sqlite3PExpr(pParse, TK_DOT, pLeft, pRight);
++  A = sqlite3ExprListAppend(pParse,A, pDot);
++}
+ 
+ // An option "AS <id>" phrase that can follow one of the expressions that
+ // define the result set, or one of the tables in the FROM clause.
+diff --git a/src/select.c b/src/select.c
+index 8fff983901..7d893661e3 100644
+--- a/src/select.c
++++ b/src/select.c
+@@ -6332,6 +6332,15 @@ static int selectExpander(Walker *pWalker, Select *p){
+             pUsing = 0;
+           }
+ 
++          /* Check if this asterisk has an EXCLUDE clause */
++          IdList *pExclude = 0;
++          if( pE->op==TK_ASTERISK && pE->x.pList ){
++            pExclude = (IdList*)pE->x.pList;
++          }else if( pE->op==TK_DOT && pE->pRight && pE->pRight->op==TK_ASTERISK 
++                   && pE->pRight->x.pList ){
++            pExclude = (IdList*)pE->pRight->x.pList;
++          }
++
+           nAdd = pTab->nCol;
+           if( VisibleRowid(pTab) && (selFlags & SF_NestedFrom)!=0 ) nAdd++;
+           for(j=0; j<nAdd; j++){
+@@ -6341,9 +6350,18 @@ static int selectExpander(Walker *pWalker, Select *p){
+             if( j==pTab->nCol ){
+               zName = sqlite3RowidAlias(pTab);
+               if( zName==0 ) continue;
++              /* Skip rowid if it's in the EXCLUDE list */
++              if( pExclude && sqlite3IdListIndex(pExclude, zName)>=0 ){
++                continue;
++              }
+             }else{
+               zName = pTab->aCol[j].zCnName;
+ 
++              /* Skip columns in the EXCLUDE list */
++              if( pExclude && sqlite3IdListIndex(pExclude, zName)>=0 ){
++                continue;
++              }
++
+               /* If pTab is actually an SF_NestedFrom sub-select, do not
+               ** expand any ENAME_ROWID columns.  */
+               if( pNestedFrom && pNestedFrom->a[j].fg.eEName==ENAME_ROWID ){
