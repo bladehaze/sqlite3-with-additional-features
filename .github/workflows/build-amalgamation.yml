@@ -21,6 +21,8 @@ env:
 jobs:
   build-amalgamation:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to create releases
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -129,6 +131,9 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
           echo "commit=$COMMIT_SHORT" >> $GITHUB_OUTPUT
+          echo "Branch: ${{ github.ref }}"
+          echo "Event: ${{ github.event_name }}"
+          echo "Tag will be: $TAG_NAME"
 
       - name: Commit amalgamation (on main only)
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
@@ -142,12 +147,21 @@ jobs:
             git push origin HEAD || echo "Push skipped"
           fi
 
-      - name: Create GitHub Release (on main branch)
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
+      - name: Debug release conditions
+        run: |
+          echo "Branch: ${{ github.ref }}"
+          echo "Event: ${{ github.event_name }}"
+          echo "Tag: ${{ steps.version.outputs.tag }}"
+          echo "Creating release on every successful build"
+
+      - name: Create GitHub Release (on every build)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: "SQLite ${{ steps.version.outputs.version }} with EXCLUDE feature"
+          overwrite: true  # Update release if tag already exists
+          fail_on_unmatched_files: false  # Don't fail if files are missing
           body: |
             SQLite with EXCLUDE feature support
             
