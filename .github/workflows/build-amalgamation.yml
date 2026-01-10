@@ -52,6 +52,8 @@ jobs:
         run: |
           gcc -o lemon tool/lemon.c
           chmod +x lemon
+          # Copy lempar.c template (required by lemon)
+          cp tool/lempar.c .
 
       - name: Build mksourceid tool
         run: |
@@ -60,14 +62,20 @@ jobs:
 
       - name: Generate parse.c and parse.h
         run: |
+          # Copy parse.y and ensure lempar.c is present
           cp src/parse.y .
+          if [ ! -f lempar.c ]; then
+            echo "Error: lempar.c template file missing"
+            exit 1
+          fi
+          # Run lemon to generate parse.c and parse.h
           ./lemon -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_PERCENTILE \
-                  -DSQLITE_HAVE_ZLIB=1 -DSQLITE_THREADSAFE=1 -S parse.y || {
-            echo "Warning: lemon had errors, but continuing..."
-          }
+                  -DSQLITE_HAVE_ZLIB=1 -DSQLITE_THREADSAFE=1 -S parse.y
           # Verify parse.c and parse.h were generated
           if [ ! -f parse.c ] || [ ! -f parse.h ]; then
             echo "Error: parse.c or parse.h was not generated"
+            echo "Lemon output files:"
+            ls -la parse.* 2>/dev/null || echo "No parse.* files found"
             exit 1
           fi
           echo "✓ parse.c and parse.h generated successfully"
