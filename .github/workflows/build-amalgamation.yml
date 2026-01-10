@@ -62,14 +62,39 @@ jobs:
         run: |
           cp src/parse.y .
           ./lemon -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_PERCENTILE \
-                  -DSQLITE_HAVE_ZLIB=1 -DSQLITE_THREADSAFE=1 -S parse.y || true
-          echo "Parser generated (conflicts may be expected and resolved at runtime)"
+                  -DSQLITE_HAVE_ZLIB=1 -DSQLITE_THREADSAFE=1 -S parse.y || {
+            echo "Warning: lemon had errors, but continuing..."
+          }
+          # Verify parse.c and parse.h were generated
+          if [ ! -f parse.c ] || [ ! -f parse.h ]; then
+            echo "Error: parse.c or parse.h was not generated"
+            exit 1
+          fi
+          echo "✓ parse.c and parse.h generated successfully"
 
       - name: Generate keyword hash
         run: |
           if [ -f tool/mkkeywordhash.c ]; then
             gcc -o mkkeywordhash tool/mkkeywordhash.c
             ./mkkeywordhash > keywordhash.h
+          fi
+
+      - name: Generate opcodes.h and opcodes.c
+        run: |
+          # opcodes.h is generated from parse.h and vdbe.c
+          if [ -f parse.h ] && [ -f src/vdbe.c ]; then
+            cat parse.h src/vdbe.c | tclsh tool/mkopcodeh.tcl > opcodes.h
+            echo "✓ Generated opcodes.h"
+          else
+            echo "Warning: Cannot generate opcodes.h (parse.h or src/vdbe.c missing)"
+          fi
+          
+          # opcodes.c is generated from opcodes.h
+          if [ -f opcodes.h ]; then
+            tclsh tool/mkopcodec.tcl opcodes.h > opcodes.c
+            echo "✓ Generated opcodes.c"
+          else
+            echo "Warning: Cannot generate opcodes.c (opcodes.h missing)"
           fi
 
       - name: Prepare source directory
@@ -80,13 +105,35 @@ jobs:
           
           # Copy all source files to tsrc/
           cp src/*.c src/*.h tsrc/ 2>/dev/null || true
-          cp parse.c parse.h tsrc/ 2>/dev/null || true
-          cp keywordhash.h tsrc/ 2>/dev/null || true
           
-          # Copy generated files
+          # Copy generated files - these are required!
+          if [ ! -f parse.c ] || [ ! -f parse.h ]; then
+            echo "Error: parse.c or parse.h missing - cannot continue"
+            exit 1
+          fi
+          cp parse.c parse.h tsrc/
+          echo "✓ Copied parse.c and parse.h to tsrc/"
+          
+          if [ -f keywordhash.h ]; then
+            cp keywordhash.h tsrc/
+          fi
+          
+          # Copy other generated files - opcodes are required!
+          if [ -f opcodes.c ] && [ -f opcodes.h ]; then
+            cp opcodes.c opcodes.h tsrc/
+            echo "✓ Copied opcodes.c and opcodes.h to tsrc/"
+          else
+            echo "Warning: opcodes.c or opcodes.h missing"
+          fi
+          
           if [ -f ctime.c ]; then cp ctime.c tsrc/; fi
-          if [ -f opcodes.c ]; then cp opcodes.c tsrc/; fi
-          if [ -f opcodes.h ]; then cp opcodes.h tsrc/; fi
+          
+          # Verify parse.c is in tsrc/ (required by mksqlite3c.tcl)
+          if [ ! -f tsrc/parse.c ]; then
+            echo "Error: tsrc/parse.c missing - mksqlite3c.tcl will fail"
+            exit 1
+          fi
+          echo "✓ Verified tsrc/parse.c exists"
 
       - name: Generate sqlite3.h
         run: |
