@@ -127,7 +127,9 @@ jobs:
         run: |
           VERSION=$(cat VERSION 2>/dev/null || echo "unknown")
           COMMIT_SHORT=$(git rev-parse --short HEAD)
-          TAG_NAME="v${VERSION}-exclude-${COMMIT_SHORT}"
+          RUN_NUMBER=${{ github.run_number }}
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          TAG_NAME="v${VERSION}-exclude-${COMMIT_SHORT}-${RUN_NUMBER}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
           echo "commit=$COMMIT_SHORT" >> $GITHUB_OUTPUT
@@ -159,8 +161,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: "SQLite ${{ steps.version.outputs.version }} with EXCLUDE feature"
-          overwrite: true  # Update release if tag already exists
+          name: "SQLite ${{ steps.version.outputs.version }} with EXCLUDE feature (Build #${{ github.run_number }})"
           fail_on_unmatched_files: false  # Don't fail if files are missing
           body: |
             SQLite with EXCLUDE feature support
