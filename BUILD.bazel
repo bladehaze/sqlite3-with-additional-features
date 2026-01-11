@@ -1,0 +1,13 @@
+# Bazel BUILD file for SQLite with EXCLUDE feature
+# This file exports sqlite3.c, sqlite3.h, sqlite3ext.h, and shell.c
+# Files are exported for the host to consume and build as needed
+
+package(default_visibility = ["//visibility:public"])
+
+# Export all SQLite files for host consumption
+exports_files([
+    "sqlite3.c",
+    "sqlite3.h",
+    "sqlite3ext.h",
+    "shell.c",
+])

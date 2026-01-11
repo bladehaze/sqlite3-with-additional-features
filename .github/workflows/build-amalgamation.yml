@@ -111,6 +111,31 @@ jobs:
           }
           rm -f sqlite3.o
 
+      - name: Generate Bazel BUILD file
+        run: |
+          # Copy BUILD.bazel from repo if it exists, otherwise generate it
+          if [ -f BUILD.bazel ]; then
+            echo "Using existing BUILD.bazel from repository"
+          else
+            echo "Generating BUILD.bazel..."
+            cat > BUILD.bazel <<'BUILDEOF'
+# Bazel BUILD file for SQLite with EXCLUDE feature
+# This file exports sqlite3.c, sqlite3.h, sqlite3ext.h, and shell.c
+# Files are exported for the host to consume and build as needed
+
+package(default_visibility = ["//visibility:public"])
+
+# Export all SQLite files for host consumption
+exports_files([
+    "sqlite3.c",
+    "sqlite3.h",
+    "sqlite3ext.h",
+    "shell.c",
+])
+BUILDEOF
+          fi
+          echo "✓ BUILD.bazel ready"
+
       - name: Create release artifact
         uses: actions/upload-artifact@v4
         with:
@@ -120,6 +145,7 @@ jobs:
             sqlite3.h
             sqlite3ext.h
             shell.c
+            BUILD.bazel
           retention-days: 90
 
       - name: Get version info
@@ -176,6 +202,7 @@ jobs:
             - `sqlite3.h` - SQLite header file
             - `sqlite3ext.h` - SQLite extension header
             - `shell.c` - SQLite shell source
+            - `BUILD.bazel` - Bazel build file for easy integration
             
             ## Usage
             ```sql
@@ -201,6 +228,7 @@ jobs:
             sqlite3.h
             sqlite3ext.h
             shell.c
+            BUILD.bazel
           draft: false
           prerelease: false
           generate_release_notes: false
@@ -214,6 +242,7 @@ jobs:
             sqlite3.h
             sqlite3ext.h
             shell.c
+            BUILD.bazel
           body: |
             SQLite with EXCLUDE feature support
             
