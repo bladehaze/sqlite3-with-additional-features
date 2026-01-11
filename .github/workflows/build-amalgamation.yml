@@ -118,21 +118,20 @@ jobs:
             echo "Using existing BUILD.bazel from repository"
           else
             echo "Generating BUILD.bazel..."
-            cat > BUILD.bazel <<'BUILDEOF'
-# Bazel BUILD file for SQLite with EXCLUDE feature
-# This file exports sqlite3.c, sqlite3.h, sqlite3ext.h, and shell.c
-# Files are exported for the host to consume and build as needed
-
-package(default_visibility = ["//visibility:public"])
-
-# Export all SQLite files for host consumption
-exports_files([
-    "sqlite3.c",
-    "sqlite3.h",
-    "sqlite3ext.h",
-    "shell.c",
-])
-BUILDEOF
+            printf '%s\n' \
+              '# Bazel BUILD file for SQLite with EXCLUDE feature' \
+              '# This file exports sqlite3.c, sqlite3.h, sqlite3ext.h, and shell.c' \
+              '# Files are exported for the host to consume and build as needed' \
+              '' \
+              'package(default_visibility = ["//visibility:public"])' \
+              '' \
+              '# Export all SQLite files for host consumption' \
+              'exports_files([' \
+              '    "sqlite3.c",' \
+              '    "sqlite3.h",' \
+              '    "sqlite3ext.h",' \
+              '    "shell.c",' \
+              '])' > BUILD.bazel
           fi
           echo "✓ BUILD.bazel ready"
 
