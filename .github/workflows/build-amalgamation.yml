@@ -111,11 +111,18 @@ jobs:
           }
           rm -f sqlite3.o
 
-      - name: Generate Bazel BUILD file
+      - name: Organize files in sqlite3 folder
         run: |
-          # Copy BUILD.bazel from repo if it exists, otherwise generate it
+          # Create sqlite3 directory for organized release
+          mkdir -p sqlite3
+          
+          # Copy all SQLite files to sqlite3 folder
+          cp sqlite3.c sqlite3.h sqlite3ext.h shell.c sqlite3/
+          
+          # Generate BUILD.bazel in sqlite3 folder
           if [ -f BUILD.bazel ]; then
             echo "Using existing BUILD.bazel from repository"
+            cp BUILD.bazel sqlite3/BUILD.bazel
           else
             echo "Generating BUILD.bazel..."
             printf '%s\n' \
@@ -131,20 +138,26 @@ jobs:
               '    "sqlite3.h",' \
               '    "sqlite3ext.h",' \
               '    "shell.c",' \
-              '])' > BUILD.bazel
+              '])' > sqlite3/BUILD.bazel
           fi
-          echo "✓ BUILD.bazel ready"
+          
+          echo "✓ Files organized in sqlite3/ folder:"
+          ls -lh sqlite3/
+
+      - name: Create zip file
+        run: |
+          # Create zip file with sqlite3 folder structure
+          zip -r sqlite3-exclude-amalgamation.zip sqlite3/
+          echo "✓ Created zip file:"
+          ls -lh sqlite3-exclude-amalgamation.zip
 
       - name: Create release artifact
         uses: actions/upload-artifact@v4
         with:
           name: sqlite3-amalgamation
           path: |
-            sqlite3.c
-            sqlite3.h
-            sqlite3ext.h
-            shell.c
-            BUILD.bazel
+            sqlite3/
+            sqlite3-exclude-amalgamation.zip
           retention-days: 90
 
       - name: Get version info
@@ -197,11 +210,22 @@ jobs:
             This release includes the `SELECT * EXCLUDE(column_list)` syntax.
             
             ## Files Included
-            - `sqlite3.c` - SQLite amalgamation source
-            - `sqlite3.h` - SQLite header file
-            - `sqlite3ext.h` - SQLite extension header
-            - `shell.c` - SQLite shell source
-            - `BUILD.bazel` - Bazel build file for easy integration
+            - `sqlite3/sqlite3.c` - SQLite amalgamation source
+            - `sqlite3/sqlite3.h` - SQLite header file
+            - `sqlite3/sqlite3ext.h` - SQLite extension header
+            - `sqlite3/shell.c` - SQLite shell source
+            - `sqlite3/BUILD.bazel` - Bazel build file for easy integration
+            
+            ## Recommended: Download the zip file
+            Download `sqlite3-exclude-amalgamation.zip` and extract it. The files will be in the `sqlite3/` folder, ready to use with Bazel:
+            ```python
+            # In your BUILD file:
+            cc_library(
+                name = "sqlite3",
+                hdrs = ["//third_party/sqlite3:sqlite3.h"],
+                srcs = ["//third_party/sqlite3:sqlite3.c"],
+            )
+            ```
             
             ## Usage
             ```sql
@@ -210,24 +234,17 @@ jobs:
             SELECT employees.* EXCLUDE(email) FROM employees;
             ```
             
-            ## Download URLs
-            You can download these files directly from:
-            - Raw file URLs (replace `${{ steps.version.outputs.tag }}` with the actual tag):
-              - `https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/sqlite3.c`
-              - `https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/sqlite3.h`
-              - `https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/sqlite3ext.h`
-              - `https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/shell.c`
-            
             ## Changes
             - Added EXCLUDE keyword support
             - Modified parser to handle EXCLUDE clause
             - Updated column expansion logic
           files: |
-            sqlite3.c
-            sqlite3.h
-            sqlite3ext.h
-            shell.c
-            BUILD.bazel
+            sqlite3-exclude-amalgamation.zip
+            sqlite3/sqlite3.c
+            sqlite3/sqlite3.h
+            sqlite3/sqlite3ext.h
+            sqlite3/shell.c
+            sqlite3/BUILD.bazel
           draft: false
           prerelease: false
           generate_release_notes: false
@@ -237,15 +254,19 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            sqlite3.c
-            sqlite3.h
-            sqlite3ext.h
-            shell.c
-            BUILD.bazel
+            sqlite3-exclude-amalgamation.zip
+            sqlite3/sqlite3.c
+            sqlite3/sqlite3.h
+            sqlite3/sqlite3ext.h
+            sqlite3/shell.c
+            sqlite3/BUILD.bazel
           body: |
             SQLite with EXCLUDE feature support
             
             This release includes the SELECT * EXCLUDE(column_list) syntax.
+            
+            ## Recommended: Download the zip file
+            Download `sqlite3-exclude-amalgamation.zip` and extract it. The files will be in the `sqlite3/` folder, ready to use with Bazel.
             
             ## Usage
             ```sql
