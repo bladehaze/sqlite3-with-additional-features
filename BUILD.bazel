@@ -11,3 +11,18 @@ exports_files([
     "sqlite3ext.h",
     "shell.c",
 ])
+
+# Core SQLite library for C++ projects using amalgamation
+cc_library(
+    name = "sqlite3_lib",
+    srcs = ["sqlite3.c"],
+    hdrs = ["sqlite3.h", "sqlite3ext.h"],
+    copts = [
+        "-DSQLITE_THREADSAFE=1",
+    ],
+    linkopts = select({
+        "@platforms//os:windows": [],
+        "//conditions:default": ["-ldl", "-lpthread"],
+    }),
+    visibility = ["//visibility:public"],
+)

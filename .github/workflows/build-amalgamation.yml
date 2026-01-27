@@ -8,6 +8,7 @@ on:
       - exclude-feature
     paths:
       - 'src/**'
+      - 'BUILD.bazel'
       - '.github/workflows/build-amalgamation.yml'
   pull_request:
     branches:
@@ -141,6 +142,12 @@ jobs:
               '])' > sqlite3/BUILD.bazel
           fi
           
+          # Ensure BUILD.bazel is in the release
+          if [ ! -f sqlite3/BUILD.bazel ]; then
+            echo "Error: BUILD.bazel was not copied to sqlite3/"
+            exit 1
+          fi
+          
           echo "✓ Files organized in sqlite3/ folder:"
           ls -lh sqlite3/
 
@@ -214,17 +221,13 @@ jobs:
             - `sqlite3/sqlite3.h` - SQLite header file
             - `sqlite3/sqlite3ext.h` - SQLite extension header
             - `sqlite3/shell.c` - SQLite shell source
-            - `sqlite3/BUILD.bazel` - Bazel build file for easy integration
+            - `sqlite3/BUILD.bazel` - Bazel build file with `sqlite3_lib` target
             
             ## Recommended: Download the zip file
-            Download `sqlite3-exclude-amalgamation.zip` and extract it. The files will be in the `sqlite3/` folder, ready to use with Bazel:
+            Download `sqlite3-exclude-amalgamation.zip` and extract it. The files will be in the `sqlite3/` folder. Use the `sqlite3_lib` target from `BUILD.bazel`:
             ```python
-            # In your BUILD file:
-            cc_library(
-                name = "sqlite3",
-                hdrs = ["//third_party/sqlite3:sqlite3.h"],
-                srcs = ["//third_party/sqlite3:sqlite3.c"],
-            )
+            # In your BUILD file (e.g. for a cc_binary or cc_library):
+            deps = ["//path/to/sqlite3:sqlite3_lib"]
             ```
             
             ## Usage
@@ -265,8 +268,12 @@ jobs:
             
             This release includes the SELECT * EXCLUDE(column_list) syntax.
             
+            ## Files
+            - `sqlite3/sqlite3.c`, `sqlite3.h`, `sqlite3ext.h`, `shell.c`
+            - `sqlite3/BUILD.bazel` with `sqlite3_lib` target for Bazel
+            
             ## Recommended: Download the zip file
-            Download `sqlite3-exclude-amalgamation.zip` and extract it. The files will be in the `sqlite3/` folder, ready to use with Bazel.
+            Download `sqlite3-exclude-amalgamation.zip` and extract it. Use `deps = ["//path/to/sqlite3:sqlite3_lib"]` in your BUILD file.
             
             ## Usage
             ```sql
